@@ -1,0 +1,35 @@
+# Render Blueprint - FREE plan, paper trading demo.
+# Repo root must be this folder (the one containing dashboard.py).
+services:
+  - type: web
+    name: nexus-smc-bot
+    runtime: python
+    plan: free
+    region: singapore            # closest to India
+    buildCommand: pip install -r requirements.txt
+    startCommand: python render_start.py
+    healthCheckPath: /_stcore/health
+    autoDeploy: false
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: AUTO_START_BOT      # paper = start the paper bot automatically after every restart; off = start it from the dashboard
+        value: paper
+      - key: MONGO_DB
+        value: nexus_smc_bot
+      - key: MONGO_URI
+        sync: false
+      - key: UPSTOX_API_KEY
+        sync: false
+      - key: UPSTOX_API_SECRET
+        sync: false
+      - key: UPSTOX_REDIRECT_URI
+        sync: false
+      - key: KITE_API_KEY
+        sync: false
+      - key: KITE_API_SECRET
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false

@@ -1,0 +1,8 @@
+.env
+data_cache/
+logs/
+KILL
+STOP
+settings.backup.yaml
+__pycache__/
+.pytest_cache/

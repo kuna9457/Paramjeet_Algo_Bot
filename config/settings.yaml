@@ -1,0 +1,136 @@
+# =====================================================================================
+#  NEXUS SMC FRACTAL ENGINE (NIFTY) - PYTHON OPTIONS BOT - USER SETTINGS
+#  Strategy keys use the SAME names as the Pine Script inputs.
+#  Timeframes are minutes as strings: "1","3","5","10","15","30","60","240"
+#  "" (empty) = use the chart timeframe (same as blank in TradingView).
+# =====================================================================================
+
+# ------------------------------------------------------------------ 1. BOT / CHART
+bot:
+  mode: paper                 # backtest | paper | live
+  chart_timeframe: 5          # strategy candle size in minutes (TradingView chart TF)
+  signal_symbol: NIFTY_SPOT   # NIFTY_SPOT | NIFTY_FUT (current-month future)
+  warmup_bars: 5000           # chart bars replayed at start to rebuild strategy state
+  candle_close_delay_sec: 3   # wait after candle close before fetching candles
+  ltp_poll_sec: 1.0           # how often spot/fut LTP is polled for SL/target monitoring
+  exit_monitoring: tick       # tick = exit as soon as LTP crosses SL/target | candle_close = only at candle close
+  mintick: 0.05
+
+# ------------------------------------------------------------------ 2. BROKERS
+brokers:
+  enabled: [upstox, zerodha]  # any of: upstox, zerodha  (orders mirrored on all enabled)
+  data_source: upstox         # broker used for candles, LTP and option chain
+  lots:
+    upstox: 1
+    zerodha: 1
+  product: NRML               # NRML (carry forward / overnight) | MIS (intraday)
+  order_type: LIMIT           # LIMIT | MARKET
+  limit_buffer_pts: 2.0       # LIMIT price = LTP + buffer (buy) / LTP - buffer (sell)
+  leg_order: buy_first        # buy_first (buy leg filled, then sell leg) | simultaneous
+  leg_fill_timeout_sec: 10    # wait for a fill before re-pricing
+  leg_retry_count: 3          # re-price attempts; if a leg still fails the filled leg is unwound
+  freeze_qty: 1755            # NSE freeze quantity for NIFTY options (orders are sliced above this; Upstox master value used if smaller)
+
+# ------------------------------------------------------------------ 3. OPTIONS HEDGE
+# BUY signal  -> BUY CALL (any strike)  + SELL PUT  (strike must end with 50)
+# SELL signal -> BUY PUT  (any strike)  + SELL CALL (strike must end with 50)
+hedge:
+  expiry_mode: nearest_weekly # nearest_weekly | next_weekly | current_monthly | next_monthly | fixed_date
+  expiry_date: ""             # YYYY-MM-DD, only used when expiry_mode = fixed_date
+  use_next_expiry_on_expiry_day: true   # on expiry day itself, pick the following expiry
+  range_min: 20               # premium difference range (points): BuyLegLTP - SellLegLTP
+  range_max: 30
+  strike_step: 50
+  strike_scan_width: 10       # strikes scanned each side of ATM (10 x 50 = +/- 500 pts)
+  buy_strike_rule: any        # any | ends_with_00 | ends_with_50
+  sell_strike_rule: ends_with_50
+  min_leg_premium: 5.0        # ignore options cheaper than this
+  rescan_interval_sec: 5
+  max_rescan_sec: 60          # no pair in range for this long -> skip trade + alert
+  expiry_day_exit: true       # square off open combos on the expiry day of their contracts
+  expiry_exit_time: "15:15"   # EOD exit time on expiry day
+  combo_sl_rs: 0              # 0 = OFF. Extra rupee stop-loss on combined combo P&L (per broker)
+  combo_target_rs: 0          # 0 = OFF. Extra rupee target on combined combo P&L (per broker)
+
+# ------------------------------------------------------------------ 4. SAFETY (all OFF by default = Pine parity)
+safety:
+  entry_window_start: ""      # e.g. "09:20" ; empty = no restriction (Pine has none)
+  entry_window_end: ""        # e.g. "15:00"
+  max_trades_per_day: 0       # 0 = OFF
+  max_daily_loss_rs: 0        # 0 = OFF
+  kill_switch: false          # true = square off everything and stop (also: create file KILL in bot folder)
+  enter_on_restart: false     # if the bot restarts while the strategy is mid-trade, do NOT open late
+
+# ------------------------------------------------------------------ 5. ALERTS / STORAGE
+alerts:
+  telegram_enabled: true      # needs TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID in .env
+storage:
+  backend: mongo              # mongo (needs MONGO_URI in .env) | local (JSON files in data_cache/)
+
+# =====================================================================================
+#  STRATEGY  (identical to the Pine Script inputs; defaults = Pine defaults)
+# =====================================================================================
+strategy:
+  # === 1. IDM ENGINE (TREND PULLBACK) ===
+  strat1_IDM: true
+  idmTf: "15"
+  idmLookback: 3              # 2 - 10
+  strat6_IDM_Precision: false
+  strat8_HTF_IDM_Trap: false
+
+  # === 2. CHOCH ENGINE (TREND REVERSAL) ===
+  strat2_CHOCH: true
+  chochStructureTf: "60"
+  strat9_Fake_CHOCH: true
+  htfSwingLength: 8           # 3 - 25
+  swingLength: 15             # 5 - 50
+
+  # === 3. ORDER BLOCK ENGINE ===
+  strat3_OB: false
+  obTimeframe: ""
+  obMitigation: "Wick Touch"  # Wick Touch | 50% Mean Threshold | Full Candle Body  (no effect in Pine, see fix_ob_mitigation)
+  maxOrderBlocks: 5           # 1 - 10
+
+  # === 4. FAIR VALUE GAP ENGINE ===
+  strat4_FVG: false
+  maxFvgCount: 5              # 1 - 10
+
+  # === 5. HTF TREND & QUALITY FILTERS ===
+  strat5_MTF: true
+  htfTimeframe: "60"
+  strat7_PD_Filter: true
+  strat12_OB_Confirm: true
+  strat13_Psychology1: true
+  strat10_Momentum_CISD: false
+  minDisplacementPct: 40.0
+  strat11_3Condition: false
+  strat16_POI_Confluence: false
+  filterEmaSqueeze: false
+  enableChopFilter: false
+  chopIndexMax: 61.8
+  enableAdxFilter: false
+  adxThreshold: 20.0
+  opposingZoneBufferAtr: 1.5
+  signalCooldownBars: 5
+  filterDuplicateTrades: true
+  allowMultiTriggerEntries: false
+
+  # === 6. SWING STOP LOSS & TARGETS (Nifty points) ===
+  slMode: "Fixed Points (Preset)"   # Fixed Points (Preset) | Swing High/Low | Custom Points
+  slFixedPreset: "80 Points"        # 70 Points | 80 Points | 90 Points
+  slCustomPoints: 80.0
+  slBufferPoints: 5.0
+  strat14_Psychology2: true
+  maxAllowedSlPoints: 160.0
+  minTargetRr: 1.5
+  subMinTargetAction: "Extend to Min R:R"   # Extend to Min R:R | Skip Trade
+  enableMaxTargetCap: false
+  maxTargetRr: 4.0
+  enableBreakEven: true
+  tp1RrMultiple: 1.0
+  strat15_LiquidityRun: false
+  costPerTradePoints: 3.0
+  maxTradeDuration: 150
+
+  # === Pine quirk fixes (false = behave exactly like TradingView) ===
+  fix_ob_mitigation: false
