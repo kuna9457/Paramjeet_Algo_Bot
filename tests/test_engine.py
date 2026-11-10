@@ -80,3 +80,10 @@ def test_fvg_timeframe_htf_zones_and_default_unchanged():
     # an HTF gap spans real 60m-candle structure, so it should be wider than typical 5m gaps
     z = (e1.bullFvgList + e1.bearFvgList)[-1]
     assert z.top > z.bottom
+
+
+def test_fvg_atr_multiplier_controls_gap_count():
+    base = replace(StrategySettings(), strat4_FVG=True, maxFvgCount=10000)
+    n = lambda m: len(run(replace(base, fvgAtrMultiplier=m))[0].bullFvgList) + len(run(replace(base, fvgAtrMultiplier=m))[0].bearFvgList)
+    assert n(0.0) >= n(0.25) >= n(1.0)
+    assert n(0.0) > n(1.0)

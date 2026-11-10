@@ -94,6 +94,7 @@ strategy:
   # === 4. FAIR VALUE GAP ENGINE ===
   strat4_FVG: false
   fvgTimeframe: ""            # blank = chart TF; else minutes (e.g. 15, 60) - gaps built from that timeframe's candles
+  fvgAtrMultiplier: 0.25      # min gap size = this x ATR(14); 0 = accept any gap
   maxFvgCount: 5              # 1 - 10
 
   # === 5. HTF TREND & QUALITY FILTERS ===

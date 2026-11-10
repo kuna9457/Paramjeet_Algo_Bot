@@ -548,6 +548,7 @@ class NexusEngine:
                         self._push_zone(self.bearObList, Zone(obTop, obBtm, False, birthBar=bi), s.maxOrderBlocks)
 
         # FVG creation
+        fvgMult = max(0.0, float(s.fvgAtrMultiplier))
         if self.useHtfFvg:
             # 3-candle gap on completed higher-timeframe bars; evaluated once when a new HTF bar closes
             l3 = self.ctx[self.fvgTfm].snap.get("last3")
@@ -557,16 +558,16 @@ class NexusEngine:
                 if hAtr is not None:
                     h3_, c2_, l1_ = b3[1], b2[3], b1[2]
                     h1_, l3_ = b1[1], b3[2]
-                    if l1_ > h3_ and c2_ > h3_ and (l1_ - h3_) >= hAtr * 0.25:
+                    if l1_ > h3_ and c2_ > h3_ and (l1_ - h3_) >= hAtr * fvgMult:
                         self._push_zone(self.bullFvgList, Zone(l1_, h3_, True, birthBar=bi), s.maxFvgCount)
-                    if h1_ < l3_ and c2_ < l3_ and (l3_ - h1_) >= hAtr * 0.25:
+                    if h1_ < l3_ and c2_ < l3_ and (l3_ - h1_) >= hAtr * fvgMult:
                         self._push_zone(self.bearFvgList, Zone(l3_, h1_, False, birthBar=bi), s.maxFvgCount)
         elif bi >= 4 and atr14 is not None:
             l1_, h3_, c2_ = self._l(1), self._h(3), self._c(2)
             h1_, l3_ = self._h(1), self._l(3)
-            if l1_ > h3_ and c2_ > h3_ and (l1_ - h3_) >= atr14 * 0.25:
+            if l1_ > h3_ and c2_ > h3_ and (l1_ - h3_) >= atr14 * fvgMult:
                 self._push_zone(self.bullFvgList, Zone(l1_, h3_, True, birthBar=bi), s.maxFvgCount)
-            if h1_ < l3_ and c2_ < l3_ and (l3_ - h1_) >= atr14 * 0.25:
+            if h1_ < l3_ and c2_ < l3_ and (l3_ - h1_) >= atr14 * fvgMult:
                 self._push_zone(self.bearFvgList, Zone(l3_, h1_, False, birthBar=bi), s.maxFvgCount)
 
         # OB first-touch / mitigation

@@ -40,6 +40,7 @@ PINE_TITLES = {
     "strat3_OB": "Enable Order Block (OB) Trigger", "obTimeframe": "Order Block Timeframe (blank = chart TF)",
     "obMitigation": "OB Mitigation Style", "maxOrderBlocks": "Max Active OB Boxes Stored",
     "strat4_FVG": "Enable Fair Value Gap (FVG) Trigger", "fvgTimeframe": "Fair Value Gap Timeframe (blank = chart TF)",
+    "fvgAtrMultiplier": "FVG Min Gap Size (x ATR)",
     "maxFvgCount": "Max Active FVGs Stored",
     "strat5_MTF": "Enable HTF Trend Filter (60m/15m Alignment)", "htfTimeframe": "HTF Macro Trend Timeframe",
     "strat7_PD_Filter": "Premium & Discount Filter (Strict 50% Rule)",

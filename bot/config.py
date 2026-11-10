@@ -35,6 +35,7 @@ class StrategySettings:
     # 4. FVG
     strat4_FVG: bool = False
     fvgTimeframe: str = ""
+    fvgAtrMultiplier: float = 0.25
     maxFvgCount: int = 5
     # 5. HTF / filters
     strat5_MTF: bool = True
