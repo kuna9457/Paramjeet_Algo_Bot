@@ -100,6 +100,9 @@ class NexusEngine:
         self.useHtfStructure = s.chochStructureTf != "" and self.chochTf != ctf and ctf <= self.chochTf
         self.useHtfIdm = s.idmTf != "" and self.idmTfm != ctf and ctf <= self.idmTfm
         self.useHtfOb = s.obTimeframe != "" and self.obTfm != ctf and ctf <= self.obTfm
+        self.fvgTfm = _tf(s.fvgTimeframe, ctf)
+        self.useHtfFvg = s.fvgTimeframe != "" and self.fvgTfm != ctf and ctf <= self.fvgTfm
+        self.lastHtfFvgTime = None
         need: Dict[int, List[int]] = {}
         need.setdefault(max(self.htfTf, ctf), [])
         if self.useHtfStructure:
@@ -108,6 +111,8 @@ class NexusEngine:
             need.setdefault(self.idmTfm, []).append(s.idmLookback)
         if self.useHtfOb:
             need.setdefault(self.obTfm, [])
+        if self.useHtfFvg:
+            need.setdefault(self.fvgTfm, [])
         self.ctx: Dict[int, HTFContext] = {tf: HTFContext(tf, lens) for tf, lens in need.items()}
         self.prev: Dict[str, Optional[float]] = {}
 
@@ -543,7 +548,20 @@ class NexusEngine:
                         self._push_zone(self.bearObList, Zone(obTop, obBtm, False, birthBar=bi), s.maxOrderBlocks)
 
         # FVG creation
-        if bi >= 4 and atr14 is not None:
+        if self.useHtfFvg:
+            # 3-candle gap on completed higher-timeframe bars; evaluated once when a new HTF bar closes
+            l3 = self.ctx[self.fvgTfm].snap.get("last3")
+            if l3 is not None and l3[1] != self.lastHtfFvgTime:
+                self.lastHtfFvgTime = l3[1]
+                (b3, b2, b1), hAtr = l3[0], l3[2]
+                if hAtr is not None:
+                    h3_, c2_, l1_ = b3[1], b2[3], b1[2]
+                    h1_, l3_ = b1[1], b3[2]
+                    if l1_ > h3_ and c2_ > h3_ and (l1_ - h3_) >= hAtr * 0.25:
+                        self._push_zone(self.bullFvgList, Zone(l1_, h3_, True, birthBar=bi), s.maxFvgCount)
+                    if h1_ < l3_ and c2_ < l3_ and (l3_ - h1_) >= hAtr * 0.25:
+                        self._push_zone(self.bearFvgList, Zone(l3_, h1_, False, birthBar=bi), s.maxFvgCount)
+        elif bi >= 4 and atr14 is not None:
             l1_, h3_, c2_ = self._l(1), self._h(3), self._c(2)
             h1_, l3_ = self._h(1), self._l(3)
             if l1_ > h3_ and c2_ > h3_ and (l1_ - h3_) >= atr14 * 0.25:

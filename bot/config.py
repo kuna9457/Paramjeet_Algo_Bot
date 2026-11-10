@@ -34,6 +34,7 @@ class StrategySettings:
     maxOrderBlocks: int = 5
     # 4. FVG
     strat4_FVG: bool = False
+    fvgTimeframe: str = ""
     maxFvgCount: int = 5
     # 5. HTF / filters
     strat5_MTF: bool = True
@@ -111,7 +112,7 @@ def _build_strategy(d: dict, bot: dict) -> StrategySettings:
         kwargs[k] = v
     s = StrategySettings(**kwargs)
     # normalise timeframe strings
-    for tf in ("idmTf", "chochStructureTf", "obTimeframe", "htfTimeframe"):
+    for tf in ("idmTf", "chochStructureTf", "obTimeframe", "fvgTimeframe", "htfTimeframe"):
         v = getattr(s, tf)
         setattr(s, tf, "" if v in (None, "") else str(v))
     s.chart_timeframe = int(bot.get("chart_timeframe", 5))

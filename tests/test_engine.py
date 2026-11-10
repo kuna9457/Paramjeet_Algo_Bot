@@ -67,3 +67,16 @@ def test_other_timeframe_15m():
     for b in resample(M1, 15):
         e.on_bar(b)
     assert e.bar_index > 1000
+
+
+def test_fvg_timeframe_htf_zones_and_default_unchanged():
+    base = replace(StrategySettings(), strat4_FVG=True)
+    e0, _ = run(base)
+    assert not e0.useHtfFvg                                   # blank = chart TF (old behaviour)
+    e1, _ = run(replace(base, fvgTimeframe="60"))
+    assert e1.useHtfFvg and e1.fvgTfm == 60
+    assert e1.bullFvgList or e1.bearFvgList                   # HTF gaps were created
+    assert not (e0.bullFvgList == e1.bullFvgList and e0.bearFvgList == e1.bearFvgList)
+    # an HTF gap spans real 60m-candle structure, so it should be wider than typical 5m gaps
+    z = (e1.bullFvgList + e1.bearFvgList)[-1]
+    assert z.top > z.bottom

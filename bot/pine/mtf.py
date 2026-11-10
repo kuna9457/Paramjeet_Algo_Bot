@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 from ..data.candle import Candle, bucket_bounds
-from .ta import EMA, pivot_high, pivot_low
+from .ta import ATR, EMA, pivot_high, pivot_low
 
 
 class HTFContext:
@@ -22,6 +22,7 @@ class HTFContext:
         self.c: List[float] = []
         self.t: List[int] = []
         self.ema20 = EMA(20)
+        self.atr = ATR(14)
         self.ema20_hist: List[Optional[float]] = []
         self.last_ph: Dict[int, Optional[float]] = {L: None for L in self.pivot_lengths}
         self.last_pl: Dict[int, Optional[float]] = {L: None for L in self.pivot_lengths}
@@ -33,7 +34,7 @@ class HTFContext:
 
     @staticmethod
     def _empty_snap():
-        return {"close_1": None, "ema20_1": None, "ph": {}, "pl": {}, "ohlct_1": (None,) * 5}
+        return {"close_1": None, "ema20_1": None, "ph": {}, "pl": {}, "ohlct_1": (None,) * 5, "last3": None}
 
     def _finalize(self):
         c = self._cur
@@ -43,6 +44,8 @@ class HTFContext:
         self.c.append(c.close)
         self.t.append(c.ts)
         self.ema20_hist.append(self.ema20.update(c.close))
+        prev_close = self.c[-2] if len(self.c) >= 2 else None
+        atr_now = self.atr.update(c.high, c.low, prev_close)
         for L in self.pivot_lengths:
             ph = pivot_high(self.h, L, L)
             pl = pivot_low(self.l, L, L)
@@ -57,6 +60,9 @@ class HTFContext:
             "ph": dict(self.last_ph),
             "pl": dict(self.last_pl),
             "ohlct_1": (self.o[-2], self.h[-2], self.l[-2], self.c[-2], self.t[-2]) if n >= 2 else (None,) * 5,
+            # last 3 completed HTF bars (oldest first) + HTF ATR(14) of the newest, for HTF FVG detection
+            "last3": ([(self.o[i], self.h[i], self.l[i], self.c[i]) for i in (-3, -2, -1)], self.t[-1], atr_now)
+                     if n >= 3 else None,
         }
         self._cur = None
         self._cur_start = None
