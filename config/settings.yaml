@@ -121,6 +121,7 @@ strategy:
   slMode: "Fixed Points (Preset)"   # Fixed Points (Preset) | Swing High/Low | Custom Points
   slFixedPreset: "80 Points"        # 70 Points | 80 Points | 90 Points
   slCustomPoints: 80.0
+  slSwingLookback: 20         # Swing High/Low SL lookback (bars): used only when fix_sl_lookback is true (Pine ignores it)
   slBufferPoints: 5.0
   strat14_Psychology2: true
   maxAllowedSlPoints: 160.0
@@ -136,3 +137,4 @@ strategy:
 
   # === Pine quirk fixes (false = behave exactly like TradingView) ===
   fix_ob_mitigation: false
+  fix_sl_lookback: false      # Pine declares slCandleLookback but never uses it (SL fallback is a fixed 25 bars). true = apply slSwingLookback

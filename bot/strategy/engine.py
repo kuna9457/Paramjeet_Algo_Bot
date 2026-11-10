@@ -246,6 +246,7 @@ class NexusEngine:
         earlyLow20 = lowest(self.L, 20)
         globalLowestLow5 = lowest(self.L, 5)
         globalHighestHigh5 = highest(self.H, 5)
+        slLb = max(1, int(s.slSwingLookback)) if s.fix_sl_lookback else 25  # Pine: input unused, fixed 25
         globalLowestLow25 = lowest(self.L, 25)
         globalHighestHigh25 = highest(self.H, 25)
 
@@ -823,7 +824,7 @@ class NexusEngine:
         # ============================================================ 9. SL & TARGET
         triggerBuy = triggerSell = False
         if candidateBuy:
-            r = self._plan_trade(1, close, atr14, recentBullIdmSweep, globalLowestLow25, globalHighestHigh25)
+            r = self._plan_trade(1, close, atr14, recentBullIdmSweep, lowest(self.L, slLb), highest(self.H, slLb))
             if r:
                 calcEntry, calcSl, slDist, calcTarget, plannedRr = r
                 triggerBuy = True
@@ -844,7 +845,7 @@ class NexusEngine:
                 self.lastBullSweepBar = -100
 
         if candidateSell:
-            r = self._plan_trade(-1, close, atr14, recentBearIdmSweep, globalLowestLow25, globalHighestHigh25)
+            r = self._plan_trade(-1, close, atr14, recentBearIdmSweep, lowest(self.L, slLb), highest(self.H, slLb))
             if r:
                 calcEntry, calcSl, slDist, calcTarget, plannedRr = r
                 triggerSell = True
@@ -901,7 +902,7 @@ class NexusEngine:
         if len(lst) > max_n:
             lst.pop(0)
 
-    def _plan_trade(self, d: int, close: float, atr14, recentSweep: bool, ll25, hh25):
+    def _plan_trade(self, d: int, close: float, atr14, recentSweep: bool, ll25, hh25):  # ll25/hh25 = swing lookback extremes
         s = self.s
         calcEntry = close
         if s.slMode == "Fixed Points (Preset)":

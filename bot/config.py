@@ -60,6 +60,7 @@ class StrategySettings:
     slMode: str = "Fixed Points (Preset)"
     slFixedPreset: str = "80 Points"
     slCustomPoints: float = 80.0
+    slSwingLookback: int = 20
     slBufferPoints: float = 5.0
     strat14_Psychology2: bool = True
     maxAllowedSlPoints: float = 160.0
@@ -74,6 +75,7 @@ class StrategySettings:
     maxTradeDuration: int = 150
     # fixes
     fix_ob_mitigation: bool = False
+    fix_sl_lookback: bool = False
     # injected from bot section
     chart_timeframe: int = 5
     mintick: float = 0.05

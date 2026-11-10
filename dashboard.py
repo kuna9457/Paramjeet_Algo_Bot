@@ -54,13 +54,14 @@ PINE_TITLES = {
     "signalCooldownBars": "Signal Cooldown Bars", "filterDuplicateTrades": "Wait for Active Trade to Close Before New Entry",
     "allowMultiTriggerEntries": "Allow Multi-Trigger Pyramiding (CHoCH + IDM)", "slMode": "Stop Loss Mode",
     "slFixedPreset": "Fixed SL Preset", "slCustomPoints": "Custom SL Points (If Custom Selected)",
-    "slBufferPoints": "SL Safety Buffer Points", "strat14_Psychology2": "Pre-Sweep SL Protection (Behind Sweep Extreme)",
+    "slSwingLookback": "Swing High/Low SL Lookback (Bars)", "slBufferPoints": "SL Safety Buffer Points", "strat14_Psychology2": "Pre-Sweep SL Protection (Behind Sweep Extreme)",
     "maxAllowedSlPoints": "Maximum Allowed SL Distance (Points)", "minTargetRr": "Minimum Target R:R Multiple",
     "subMinTargetAction": "Sub-Minimum Target Action", "enableMaxTargetCap": "Enable Max Target Cap",
     "maxTargetRr": "Max Target R:R Ceiling (If Enabled)", "enableBreakEven": "Move SL to Break-Even at TP1",
     "tp1RrMultiple": "TP1 Milestone R:R (Triggers Break-Even)",
     "strat15_LiquidityRun": "Target Nearest Institutional Swing Liquidity",
     "costPerTradePoints": "Estimated Cost / Slippage (Points per Trade)", "maxTradeDuration": "Max Swing Hold Duration (Bars)",
+    "fix_sl_lookback": "Apply Swing SL Lookback (Pine ignores it; false = identical to TradingView)",
     "fix_ob_mitigation": "Fix Pine OB-mitigation quirk (false = identical to TradingView)",
 }
 TF_OPTS = ["", "1", "3", "5", "10", "15", "30", "60", "120", "240"]

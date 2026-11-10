@@ -87,3 +87,11 @@ def test_fvg_atr_multiplier_controls_gap_count():
     n = lambda m: len(run(replace(base, fvgAtrMultiplier=m))[0].bullFvgList) + len(run(replace(base, fvgAtrMultiplier=m))[0].bearFvgList)
     assert n(0.0) >= n(0.25) >= n(1.0)
     assert n(0.0) > n(1.0)
+
+
+def test_sl_swing_lookback_is_a_setting():
+    base = replace(StrategySettings(), slMode="Swing High/Low")
+    assert StrategySettings().slSwingLookback == 20 and not StrategySettings().fix_sl_lookback
+    ref = [x.to_dict() for x in run(base)[1]]
+    # default = identical to TradingView (lookback ignored), even if the value is changed
+    assert [x.to_dict() for x in run(replace(base, slSwingLookback=5))[1]] == ref
