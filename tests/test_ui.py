@@ -62,3 +62,16 @@ def test_backtest_chart_builds():
         a, b = charts.window_for(trades[0], 5)
         charts.price_chart(df, trades, 5, xrange=(a, b))
         charts.equity_chart(trades)
+
+
+def test_add_missing_keys_restores_new_settings_without_touching_saved_values():
+    import yaml
+    from bot.config import DEFAULT_SETTINGS
+    from bot.ui.settings_io import add_missing_keys
+    default = DEFAULT_SETTINGS.read_text(encoding="utf-8")
+    old = "\n".join(l for l in default.splitlines() if "fvgTimeframe" not in l).replace("maxFvgCount: 5", "maxFvgCount: 9")
+    merged = add_missing_keys(old, default)
+    d = yaml.safe_load(merged)
+    assert d["strategy"]["fvgTimeframe"] == "" and d["strategy"]["maxFvgCount"] == 9
+    assert merged.index("fvgTimeframe") < merged.index("maxFvgCount")
+    assert add_missing_keys(merged, default) == merged

@@ -84,6 +84,61 @@ def update_text(text: str, updates: Dict[Path_, Any]) -> str:
     return "".join(out)
 
 
+def add_missing_keys(saved_text: str, default_text: str) -> str:
+    """Insert keys that exist in the repo's default YAML but not in an older saved copy (e.g. settings
+    restored from MongoDB before a feature was added). Saved values are never changed. Top-level
+    sections with one nesting level only, which is how settings.yaml is laid out."""
+    saved = flatten(yaml.safe_load(saved_text) or {})
+    dflt = flatten(yaml.safe_load(default_text) or {})
+    missing = [p for p in dflt if p not in saved and len(p) == 2]
+    if not missing:
+        return saved_text
+    lines = saved_text.splitlines(keepends=True)
+    dlines = default_text.splitlines()
+
+    def default_line(path):
+        sect = None
+        for ln in dlines:
+            m = LINE.match(ln)
+            if not m or ln.lstrip().startswith("#"):
+                continue
+            if not m.group("ind") and m.group("val").strip() == "":
+                sect = m.group("key")
+            elif sect == path[0] and m.group("key") == path[1] and m.group("ind"):
+                return ln
+        return None
+
+    def find_line(path):  # index of a key's line in `lines`
+        sect = None
+        for i, ln in enumerate(lines):
+            m = LINE.match(ln.rstrip("\r\n"))
+            if not m or ln.lstrip().startswith("#"):
+                continue
+            if not m.group("ind") and m.group("val").strip() == "":
+                sect = m.group("key")
+            elif sect == path[0] and m.group("key") == path[1] and m.group("ind"):
+                return i
+        return None
+
+    order = list(dflt)
+    for path in missing:
+        new_line = default_line(path)
+        if new_line is None:
+            continue
+        idx = None
+        for prev in reversed(order[:order.index(path)]):      # nearest earlier sibling already present
+            if prev[0] == path[0] and (idx := find_line(prev)) is not None:
+                break
+        if idx is None:
+            idx = next((i for i, ln in enumerate(lines) if ln.startswith(path[0] + ":")), None)
+        if idx is None:
+            continue
+        if not lines[idx].endswith(("\n", "\r\n")):
+            lines[idx] += "\n"
+        lines.insert(idx + 1, new_line + "\n")
+    return "".join(lines)
+
+
 def read_raw(path: Path = DEFAULT_SETTINGS) -> Tuple[dict, str]:
     text = Path(path).read_text(encoding="utf-8")
     return yaml.safe_load(text) or {}, text
