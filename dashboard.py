@@ -468,6 +468,26 @@ def page_login():
     st.title("🔑 Login & connections")
     st.caption("Broker tokens expire every day (~06:00 IST). Log in each morning before 09:15.")
     s = S()
+    # Auto-capture: broker redirects back here with ?code=... (Upstox) or ?request_token=... (Kite)
+    qp = st.query_params
+    for _b, _p in (("upstox", "code"), ("zerodha", "request_token")):
+        _v = qp.get(_p)
+        if not _v:
+            continue
+        try:
+            if _b == "upstox":
+                from bot.brokers.upstox import UpstoxBroker
+                _red = env("UPSTOX_REDIRECT_URI")
+                _tok = UpstoxBroker.exchange_code(env("UPSTOX_API_KEY"), env("UPSTOX_API_SECRET"), _red, _v)
+            else:
+                from bot.brokers.zerodha import ZerodhaBroker
+                _tok = ZerodhaBroker.exchange_request_token(env("KITE_API_KEY"), env("KITE_API_SECRET"), _v)
+            save_token(storage(), _b, _tok)
+            st.success(f"{_b.capitalize()} token captured automatically and saved for today ✅")
+        except Exception as e:  # noqa
+            st.error(f"{_b.capitalize()} auto-login failed: {e}  "
+                     f"(redirect URI used: `{env('UPSTOX_REDIRECT_URI') if _b == 'upstox' else '-'}`)")
+        st.query_params.clear()  # codes are single-use; don't retry on rerun
     cols = st.columns(2)
     for col, broker in zip(cols, ["upstox", "zerodha"]):
         with col, st.container(border=True):
@@ -869,7 +889,8 @@ def main():
              "📜 History": page_history, "📈 Backtest": page_backtest, "📄 Logs": page_logs}
     with st.sidebar:
         st.markdown("## 📈 Nexus SMC Bot")
-        choice = st.radio("Page", list(pages), label_visibility="collapsed")
+        _oauth = bool(st.query_params.get("code") or st.query_params.get("request_token"))
+        choice = st.radio("Page", list(pages), index=2 if _oauth else 0, label_visibility="collapsed")
         st.divider()
         try:
             doc, proc, age, running = bot_status()
