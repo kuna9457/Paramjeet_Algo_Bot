@@ -687,9 +687,7 @@ def page_history():
 
 
 # ====================================================================================== page: backtest
-QUICK = ["chart_timeframe", "strat1_IDM", "strat2_CHOCH", "strat3_OB", "strat4_FVG", "strat5_MTF", "strat7_PD_Filter",
-         "slMode", "slFixedPreset", "slCustomPoints", "minTargetRr", "enableBreakEven", "tp1RrMultiple",
-         "maxTradeDuration", "costPerTradePoints"]
+NIFTY_LOT_SIZE = 65   # only used for the rupee estimate on the backtest page
 
 
 def page_backtest():
@@ -738,28 +736,24 @@ def page_backtest():
         st.caption("Random-walk data only to try the dashboard – results mean nothing for the real market.")
         candles, label = synthetic_1m(int(dd), int(seed)), f"synthetic {dd}d seed {seed}"
 
-    with st.expander("Quick overrides for this backtest (saved settings are not changed)"):
-        base = s.strategy
-        ov = {}
-        cols = st.columns(3)
-        for i, k in enumerate(QUICK):
-            with cols[i % 3]:
-                v = getattr(base, k)
-                p = ("bot", "chart_timeframe") if k == "chart_timeframe" else ("strategy", k)
-                ov[k] = _widget(p, v, {}, "bt:") if k != "chart_timeframe" else \
-                    st.selectbox("Chart timeframe (min)", CHOICES["bot.chart_timeframe"],
-                                 index=CHOICES["bot.chart_timeframe"].index(v) if v in CHOICES["bot.chart_timeframe"] else 2,
-                                 key="bt_tf")
-        st.markdown("**Rupee estimate**")
-        r1, r2 = st.columns(2)
-        lots = r1.number_input("Lots", 1, 100, int(sum((s.brokers.get("lots") or {"x": 1}).values())))
-        lot_size = r2.number_input("Lot size", 1, 500, 65)
-        st.caption("BUY CALL + SELL PUT moves about 1:1 with Nifty (synthetic future), so ₹ ≈ Nifty points × lots × lot size. "
-                   "Premium difference, slippage and charges are not included.")
+    # The backtest always uses the saved settings (Settings page) - there are no separate backtest inputs.
+    enabled = list(s.brokers.get("enabled") or [])
+    lot_map = s.brokers.get("lots") or {}
+    lots = max(1, int(sum(int(lot_map.get(b, 1)) for b in enabled))) if enabled else 1
+    lot_size = NIFTY_LOT_SIZE
+    with st.expander("Settings used by this backtest (edit them on the ⚙️ Settings page)", expanded=False):
+        st.markdown(f"Strategy: all **Pine inputs** from Settings · chart timeframe **{s.strategy.chart_timeframe}m** · "
+                    f"lots **{lots}** ({', '.join(f'{b}: {lot_map.get(b, 1)}' for b in enabled) or 'none enabled'}) × "
+                    f"lot size {lot_size}")
+        st.caption("₹ ≈ Nifty points × lots × lot size (BUY CALL + SELL PUT moves about 1:1 with Nifty). Option "
+                   "premiums, strike/expiry selection, slippage and charges are not simulated: there is no historical "
+                   "option-chain data.")
+        with st.expander("Full strategy settings in use"):
+            st.json(dataclasses.asdict(s.strategy))
 
     if candles and st.button("▶ Run backtest", type="primary"):
         from backtest.runner import run_backtest
-        cfg = dataclasses.replace(s.strategy, **ov)
+        cfg = s.strategy
         with st.spinner(f"Running strategy on {len(candles):,} candles ..."):
             res = run_backtest(candles, cfg, rows, ROOT / "logs" / "backtest")
         st.session_state["bt_res"] = (res, cfg.chart_timeframe, label, lots * lot_size)
