@@ -65,6 +65,9 @@ class LiveBot:
         self.state = "STARTING"
         self.state_msg = ""
         self.last_ltp: Optional[float] = None
+        self.last_ltp_at: Optional[datetime] = None      # when the last LTP tick was received
+        self.last_candle_at: Optional[datetime] = None   # start time of the newest 1m candle received
+        self.data_err = ""
         self.last_hb = 0.0
         self.started_at = now_ist().isoformat()
         self.recent = deque(maxlen=CHART_BARS)   # recent bars + levels for the dashboard live chart
@@ -87,6 +90,8 @@ class LiveBot:
             self.exec_brokers = {f"paper-{n}": PaperBroker(self.data, n) for n in names}
         self.executor = ComboExecutor(self.exec_brokers, self.S.brokers, self.storage, self.notify)
         self.signal_inst = self.data.signal_instrument(self.S.bot.signal_symbol)
+        log.info("TICKER: %s (%s) | data source: %s | chart TF %sm", self.S.bot.signal_symbol,
+                 self.signal_inst.symbol, ds, self.tf)
         log.info("Signal instrument: %s | execution: %s | mode: %s", self.signal_inst.symbol,
                  list(self.exec_brokers), self.mode)
 
@@ -202,7 +207,7 @@ class LiveBot:
             _, strikes = strike_window(ref, int(H.get("strike_step", 50)), int(H.get("strike_scan_width", 10)))
             chain = self.data.option_chain(expiry, strikes)
             pair, matches = find_pair(ev.direction, chain, ref, H)
-            if pair or time.time() >= deadline:
+            if pair or time.time() >= deadline or self.stop_requested():
                 break
             log.info("No pair in range %s-%s yet, rescanning", H.range_min, H.range_max)
             time.sleep(float(H.get("rescan_interval_sec", 5)))
@@ -234,7 +239,11 @@ class LiveBot:
             m1 = self.data.candles_1m_today(self.signal_inst)
         except BrokerError as e:
             log.warning("candle fetch failed: %s", e)
+            self.data_err = f"candle fetch failed: {e}"
             return
+        self.data_err = ""
+        if m1:
+            self.last_candle_at = max(c.time for c in m1)
         m1_times = {c.time for c in m1}
         m1 = [c for c in m1 if c.time + timedelta(minutes=1) <= n]
         bars = resample(m1, self.tf)
@@ -423,10 +432,14 @@ class LiveBot:
             mtm = {}
             if self.data is not None and self.signal_inst is not None and self.state == "RUNNING":
                 try:
-                    self.last_ltp = self.data.ltp([self.signal_inst]).get(self.signal_inst.key) or self.last_ltp
+                    px = self.data.ltp([self.signal_inst]).get(self.signal_inst.key)
+                    if px:
+                        self.last_ltp, self.last_ltp_at = px, now_ist()
+                        self.data_err = ""
                     for c in self.open_combos():
                         mtm[c["id"]] = self.executor.combo_mtm(c, self.data)
                 except Exception as e:  # noqa
+                    self.data_err = f"ltp failed: {e}"
                     log.debug("heartbeat ltp failed: %s", e)
             e = self.engine
             self.storage.upsert("status", {"id": "bot"}, {
@@ -434,7 +447,9 @@ class LiveBot:
                 "started_at": self.started_at, "updated_at": now_ist().isoformat(),
                 "signal_symbol": self.S.bot.signal_symbol, "tf": self.tf,
                 "brokers": list(self.exec_brokers), "data_source": self.S.brokers.data_source,
-                "ltp": self.last_ltp, "last_bar": self.last_bar_time.isoformat() if self.last_bar_time else None,
+                "ltp": self.last_ltp, "ltp_at": self.last_ltp_at.isoformat() if self.last_ltp_at else None,
+                "last_candle_at": self.last_candle_at.isoformat() if self.last_candle_at else None,
+                "data_err": self.data_err, "last_bar": self.last_bar_time.isoformat() if self.last_bar_time else None,
                 "trend": e.trendBias if e else None, "htf_bias": (e.diag.get("htfBias") if e else None),
                 "position": e.position() if e else None, "stats": e.stats() if e else None,
                 "mtm": mtm,

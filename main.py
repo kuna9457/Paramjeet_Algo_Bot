@@ -49,7 +49,26 @@ def cmd_run(S, args):
         print("LIVE MODE: real orders will be placed on", S.brokers.enabled)
     st = storage_from(S)
     nt = Notifier(S.alerts.get("telegram_enabled", True), env("TELEGRAM_BOT_TOKEN"), env("TELEGRAM_CHAT_ID"))
-    LiveBot(S, st, nt, mode).run()
+    bot = LiveBot(S, st, nt, mode)
+    import os
+    import signal
+
+    def _sig(*_):   # SIGTERM / SIGBREAK (Windows) -> graceful stop
+        bot.running = False
+        from bot.live.runner import STOP_FILE
+        STOP_FILE.write_text("signal", encoding="utf-8")
+    for name in ("SIGTERM", "SIGBREAK"):
+        if hasattr(signal, name):
+            try:
+                signal.signal(getattr(signal, name), _sig)
+            except Exception:  # noqa
+                pass
+    try:
+        bot.run()
+    finally:
+        logging.shutdown()
+        if os.environ.get("NEXUS_FROM_DASHBOARD"):
+            os._exit(0)   # never linger on stray threads/connections - lets the dashboard start again
 
 
 def cmd_login(S, args):

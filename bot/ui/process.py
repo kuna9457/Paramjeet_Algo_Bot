@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from typing import Optional
 
 from ..config import ROOT
@@ -14,6 +15,7 @@ PID_FILE = ROOT / "logs" / "bot_process.json"
 CONSOLE_LOG = ROOT / "logs" / "bot_console.log"
 STOP_FILE = ROOT / "STOP"
 KILL_FILE = ROOT / "KILL"
+STOP_GRACE_SEC = 45   # after this a bot that ignores the stop request is force-killed
 
 
 def _alive(pid: int) -> bool:
@@ -22,7 +24,7 @@ def _alive(pid: int) -> bool:
     if os.name == "nt":
         out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"], capture_output=True,
                              text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
-        return f'"{pid}"' in out
+        return f'"{pid}"' in out and "python" in out.lower()   # guards against a reused PID
     try:
         os.kill(pid, 0)
         return True
@@ -38,7 +40,16 @@ def info() -> Optional[dict]:
         rec = json.loads(PID_FILE.read_text(encoding="utf-8"))
     except Exception:  # noqa
         return None
-    return rec if _alive(int(rec.get("pid", 0))) else None
+    if not _alive(int(rec.get("pid", 0))):
+        PID_FILE.unlink(missing_ok=True)
+        return None
+    # A stop was requested but the process is still alive after the grace period -> it is hung; kill it.
+    if STOP_FILE.exists() and time.time() - STOP_FILE.stat().st_mtime > STOP_GRACE_SEC:
+        _kill(int(rec["pid"]))
+        PID_FILE.unlink(missing_ok=True)
+        STOP_FILE.unlink(missing_ok=True)
+        return None
+    return rec
 
 
 def start(mode: str) -> dict:
@@ -56,7 +67,7 @@ def start(mode: str) -> dict:
         kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | getattr(subprocess, "CREATE_NO_WINDOW", 0)
     else:
         kw["start_new_session"] = True
-    env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
+    env = dict(os.environ, NEXUS_FROM_DASHBOARD="1", PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
     p = subprocess.Popen([sys.executable, str(ROOT / "main.py"), "run", "--mode", mode], cwd=str(ROOT),
                          stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env, **kw)
     rec = {"pid": p.pid, "mode": mode, "started_at": now_ist().isoformat()}
@@ -77,18 +88,32 @@ def kill_switch(on: bool) -> None:
         KILL_FILE.unlink(missing_ok=True)
 
 
-def force_stop() -> bool:
-    rec = info()
-    if not rec:
-        return False
-    pid = int(rec["pid"])
+def _kill(pid: int) -> None:
     if os.name == "nt":
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True,
                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     else:
         import signal
-        os.kill(pid, signal.SIGTERM)
-    return True
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def force_stop(storage=None) -> bool:
+    """Kill the process, clear the stale files and mark the status STOPPED so Start works immediately."""
+    rec = info()
+    if rec:
+        _kill(int(rec["pid"]))
+    PID_FILE.unlink(missing_ok=True)
+    STOP_FILE.unlink(missing_ok=True)
+    if storage is not None:
+        try:
+            storage.upsert("status", {"id": "bot"}, {"state": "STOPPED", "msg": "force stopped from dashboard",
+                                                     "updated_at": now_ist().isoformat()})
+        except Exception:  # noqa
+            pass
+    return bool(rec)
 
 
 def tail(path, lines: int = 300) -> str:

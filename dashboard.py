@@ -135,6 +135,11 @@ def bot_status():
         t = parse_t(doc["updated_at"])
         age = (pd.Timestamp(now_ist().replace(tzinfo=None)) - t).total_seconds() if t is not None else None
     alive_hb = age is not None and age < 40 and doc.get("state") not in ("STOPPED", "KILLED")
+    if proc and doc.get("state") in ("STOPPED", "KILLED") and doc.get("pid") == proc.get("pid"):
+        alive_hb = False   # bot reported it stopped; don't let a lingering process block Start
+        if age is not None and age > 10:
+            process.force_stop(st_)
+            proc = None
     running = bool(proc) or alive_hb
     return doc, proc, age, running
 
@@ -204,6 +209,23 @@ def page_control():
         if proc:
             cap.append(f"pid {proc['pid']}, started {proc['started_at'][:19].replace('T', ' ')}")
         st.caption(" · ".join(cap) or "Bot has not run yet.")
+        if running:
+            def _age(key):
+                t = parse_t(doc.get(key)) if doc.get(key) else None
+                return None if t is None else (pd.Timestamp(now_ist().replace(tzinfo=None)) - t).total_seconds()
+            tick, cndl = _age("ltp_at"), _age("last_candle_at")
+            fresh = tick is not None and tick < 15
+            market_open = doc.get("state") == "RUNNING"
+            line = (f"📡 **Ticker: {doc.get('signal_symbol', s.bot.signal_symbol)}** via {doc.get('data_source', '—')} · "
+                    f"chart {doc.get('tf', s.bot.chart_timeframe)}m · last tick "
+                    + (f"{tick:,.0f}s ago" if tick is not None else "none yet")
+                    + (f" · newest 1m candle {str(doc['last_candle_at'])[11:16]}" if doc.get("last_candle_at") else ""))
+            if not market_open:
+                st.info(line + " · market closed / idle")
+            elif fresh:
+                st.success(line + " · ✅ data flowing")
+            else:
+                st.error(line + " · ⚠ NO FRESH DATA" + (f" – {doc['data_err']}" if doc.get("data_err") else ""))
         if doc.get("state") == "WAITING_LOGIN" and running:
             st.error(f"Waiting for broker login: {doc.get('msg')}. Open **Login & connections**.")
         if process.KILL_FILE.exists():
@@ -294,7 +316,7 @@ def page_control():
             process.request_stop()
             st.info("Stop requested – the bot exits within a few seconds.")
         if st.button("Force stop (kill process)", disabled=not proc, width="stretch"):
-            process.force_stop()
+            process.force_stop(storage())
             st.warning("Process killed.")
             time.sleep(1)
             st.rerun()
