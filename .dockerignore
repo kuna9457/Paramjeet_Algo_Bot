@@ -1,0 +1,14 @@
+.env
+.git
+.gitignore
+.pytest_cache
+__pycache__
+**/__pycache__
+*.pyc
+logs
+data_cache
+KILL
+STOP
+*.bat
+DEPLOY_RENDER.md
+render.yaml

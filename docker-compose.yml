@@ -1,0 +1,22 @@
+
+......................services:
+  nexus-bot:
+    image: ${NEXUS_IMAGE:-nexus-smc-bot:latest}
+    build: .
+    container_name: nexus-smc-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      AUTO_START_BOT: ${AUTO_START_BOT:-off}   # off | paper | live
+      TZ: Asia/Kolkata
+    ports:
+      - "127.0.0.1:8501:8501"                  # dashboard reachable on this PC only
+    volumes:
+      - nexus_logs:/app/logs
+      - nexus_data:/app/data_cache
+      - nexus_config:/app/config               # keeps settings saved from the dashboard
+
+volumes:
+  nexus_logs:
+  nexus_data:
+  nexus_config:

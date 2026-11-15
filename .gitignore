@@ -6,3 +6,7 @@ STOP
 settings.backup.yaml
 __pycache__/
 .pytest_cache/
+installer/build/
+installer/dist/
+logs/
+dashboard.pid
