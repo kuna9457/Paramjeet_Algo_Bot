@@ -2,13 +2,15 @@
 
     streamlit run dashboard.py
 
-Pages: Bot control (live status/chart/combos, start/stop/kill), Settings, Login & connections,
+Pages: Bot control (ONE live page: status, chart, open combos, today's trades & signals, activity log,
+start/stop/kill), Settings, Login & connections,
 History, Backtest (strategy on a historical chart), Logs.
 """
 from __future__ import annotations
 
 import dataclasses
 import hmac
+import inspect
 import os
 import shutil
 import time
@@ -181,10 +183,69 @@ def check_password() -> bool:
     return False
 
 
+# ====================================================================================== live monitoring panels
+IMPORTANT_LOG = ("ALERT", "WARNING", "ERROR", "Traceback", "ombo", "ENTRY", "EXIT", "rder", "KILL", "ogin", "stopped",
+                 "started", "Warm-up", "connected")
+_CODE_KW = {"wrap_lines": True} if "wrap_lines" in inspect.signature(st.code).parameters else {}
+
+
+def _hms(x) -> str:
+    t = parse_t(x) if x else None
+    return "" if t is None or pd.isna(t) else t.strftime("%H:%M:%S")
+
+
+def trades_today_panel(today_c: list, events: list) -> None:
+    """Today's option combos (the 'trade punches') and strategy signals, newest first."""
+    st.subheader("🧾 Trades today")
+    if not today_c:
+        st.info("No trades yet today. Entries appear here the moment the bot places them.")
+    else:
+        rows = []
+        for c in sorted(today_c, key=lambda x: str(x.get("opened_at", "")), reverse=True):
+            b, sl = c.get("buy") or {}, c.get("sell") or {}
+            pnl = c.get("pnl") or {}
+            rows.append({"opened": _hms(c.get("opened_at")), "closed": _hms(c.get("closed_at")),
+                         "mode": combo_mode(c), "side": c.get("side"), "trigger": c.get("trigger"),
+                         "status": c.get("status"), "BUY leg": f"{b.get('strike', '')} {b.get('type', '')}".strip(),
+                         "SELL leg": f"{sl.get('strike', '')} {sl.get('type', '')}".strip(),
+                         "Nifty entry": c.get("nifty_entry"), "SL": c.get("sl"), "Target": c.get("target"),
+                         "exit reason": c.get("exit_reason", ""), "P&L ₹": round(combo_total(c)) if pnl else None})
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+    st.subheader("🔔 Signals & events today")
+    if not events:
+        st.info("No strategy signals yet today.")
+    else:
+        rows = [{"time": _hms(e.get("time")), "event": e.get("kind"), "direction": fmt_dir(e.get("direction")),
+                 "trigger": e.get("trigger"), "price": e.get("price"), "SL": e.get("sl"), "target": e.get("target"),
+                 "reason": e.get("reason"), "pts": e.get("pnl_points"), "mode": e.get("mode")}
+                for e in sorted(events, key=lambda x: str(x.get("time")), reverse=True)]
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+
+def activity_log_panel() -> None:
+    """Newest-first tail of the bot log. Refreshes together with the live panel."""
+    c1, c2 = st.columns([3, 2])
+    view = c1.radio("Log view", ["Important", "Everything"], horizontal=True, label_visibility="collapsed",
+                    key="act_view")
+    n = int(c2.selectbox("Lines", [50, 100, 200, 500], index=1, label_visibility="collapsed", key="act_n"))
+    path = ROOT / "logs" / "bot.log"
+    if not path.exists():
+        path = process.CONSOLE_LOG
+    lines = process.tail(path, 3000 if view == "Important" else n).splitlines()
+    if view == "Important":
+        lines = [ln for ln in lines if any(k in ln for k in IMPORTANT_LOG)]
+    lines = lines[-n:][::-1]
+    with st.container(height=520):
+        st.code("\n".join(lines) or "(no log lines yet - start the bot)", language="log", **_CODE_KW)
+
+
 # ====================================================================================== page: bot control
 def page_control():
     st.title("🤖 Bot control")
     s = S()
+    _d0, _p0, _a0, _running0 = bot_status()
+    ctrl = st.expander("🎛️ Bot controls: start / stop / kill switch / option scan", expanded=not _running0)
 
     @st.fragment(run_every="5s")
     def live_panel():
@@ -285,59 +346,66 @@ def page_control():
         else:
             st.info("The live chart appears after the bot finishes its warm-up.")
 
+        st.divider()
+        left, right = st.columns([3, 2], gap="medium")
+        with left:
+            trades_today_panel(today_c, [e for e in st_.find("events") if str(e.get("time", "")).startswith(today)])
+        with right:
+            st.subheader("📟 Activity log")
+            activity_log_panel()
+
     live_panel()
 
-    st.divider()
-    st.subheader("Controls")
-    doc, proc, age, running = bot_status()
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.markdown("**Start**")
-        mode = st.radio("Mode", ["paper", "live"], horizontal=True, index=0 if s.bot.mode != "live" else 1,
-                        label_visibility="collapsed")
-        confirm = True
-        if mode == "live":
-            if ON_RENDER:
-                st.warning("Render has no fixed outgoing IP, so brokers will reject live orders. Use paper mode here.")
-            confirm = st.checkbox("I understand real orders will be placed on " + ", ".join(s.brokers.enabled))
-        if st.button("▶ Start bot", type="primary", disabled=running or not confirm or process.KILL_FILE.exists(),
-                     width="stretch"):
-            try:
-                rec = process.start(mode)
-                st.success(f"Started ({mode}), pid {rec['pid']}. Warm-up takes ~1 minute.")
-                time.sleep(2)
+    with ctrl:
+        doc, proc, age, running = bot_status()
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.markdown("**Start**")
+            mode = st.radio("Mode", ["paper", "live"], horizontal=True, index=0 if s.bot.mode != "live" else 1,
+                            label_visibility="collapsed")
+            confirm = True
+            if mode == "live":
+                if ON_RENDER:
+                    st.warning("Render has no fixed outgoing IP, so brokers will reject live orders. Use paper mode here.")
+                confirm = st.checkbox("I understand real orders will be placed on " + ", ".join(s.brokers.enabled))
+            if st.button("▶ Start bot", type="primary", disabled=running or not confirm or process.KILL_FILE.exists(),
+                         width="stretch"):
+                try:
+                    rec = process.start(mode)
+                    st.success(f"Started ({mode}), pid {rec['pid']}. Warm-up takes ~1 minute.")
+                    time.sleep(2)
+                    st.rerun()
+                except Exception as e:  # noqa
+                    st.error(str(e))
+        with c2:
+            st.markdown("**Stop**")
+            st.caption("Graceful stop. Open combos stay open.")
+            if st.button("⏹ Stop bot", disabled=not running, width="stretch"):
+                process.request_stop()
+                st.info("Stop requested – the bot exits within a few seconds.")
+            if st.button("Force stop (kill process)", disabled=not proc, width="stretch"):
+                process.force_stop(storage())
+                st.warning("Process killed.")
+                time.sleep(1)
                 st.rerun()
-            except Exception as e:  # noqa
-                st.error(str(e))
-    with c2:
-        st.markdown("**Stop**")
-        st.caption("Graceful stop. Open combos stay open.")
-        if st.button("⏹ Stop bot", disabled=not running, width="stretch"):
-            process.request_stop()
-            st.info("Stop requested – the bot exits within a few seconds.")
-        if st.button("Force stop (kill process)", disabled=not proc, width="stretch"):
-            process.force_stop(storage())
-            st.warning("Process killed.")
-            time.sleep(1)
-            st.rerun()
-    with c3:
-        st.markdown("**Kill switch**")
-        st.caption("Squares off ALL open combos, then stops the bot.")
-        if process.KILL_FILE.exists():
-            if st.button("Clear kill switch", width="stretch"):
-                process.kill_switch(False)
-                st.rerun()
-        else:
-            sure = st.checkbox("Yes, square off everything")
-            if st.button("⛔ KILL – exit all", disabled=not sure, width="stretch"):
-                process.kill_switch(True)
-                st.error("Kill switch ON.")
-    with c4:
-        st.markdown("**Quick scan**")
-        st.caption("Which option pair would be traded right now (no orders).")
-        side = st.radio("Side", ["BUY", "SELL"], horizontal=True, label_visibility="collapsed")
-        if st.button("🔎 Scan option chain", width="stretch"):
-            scan_now(side)
+        with c3:
+            st.markdown("**Kill switch**")
+            st.caption("Squares off ALL open combos, then stops the bot.")
+            if process.KILL_FILE.exists():
+                if st.button("Clear kill switch", width="stretch"):
+                    process.kill_switch(False)
+                    st.rerun()
+            else:
+                sure = st.checkbox("Yes, square off everything")
+                if st.button("⛔ KILL – exit all", disabled=not sure, width="stretch"):
+                    process.kill_switch(True)
+                    st.error("Kill switch ON.")
+        with c4:
+            st.markdown("**Quick scan**")
+            st.caption("Which option pair would be traded right now (no orders).")
+            side = st.radio("Side", ["BUY", "SELL"], horizontal=True, label_visibility="collapsed")
+            if st.button("🔎 Scan option chain", width="stretch"):
+                scan_now(side)
 
 
 def scan_now(side: str):
