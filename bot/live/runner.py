@@ -349,8 +349,8 @@ class LiveBot:
                     if (d == 1 and ltp <= e.slPrice) or (d == -1 and ltp >= e.slPrice):
                         self.notify.send(f"Nifty {ltp:.2f} hit SL {e.slPrice:.2f}")
                         self._close(c, "SL_TICK")
-                    elif (d == 1 and ltp >= e.targetPrice) or (d == -1 and ltp <= e.targetPrice):
-                        self.notify.send(f"Nifty {ltp:.2f} hit Target {e.targetPrice:.2f}")
+                    elif (d == 1 and ltp >= e.effective_target()) or (d == -1 and ltp <= e.effective_target()):
+                        self.notify.send(f"Nifty {ltp:.2f} hit Target {e.effective_target():.2f}")
                         self._close(c, "TARGET_TICK")
         # rupee SL / target (optional)
         sl_rs, tg_rs = float(H.get("combo_sl_rs") or 0), float(H.get("combo_target_rs") or 0)

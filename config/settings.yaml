@@ -11,7 +11,7 @@ bot:
   chart_timeframe: 5          # strategy candle size in minutes (TradingView chart TF)
   signal_symbol: NIFTY_SPOT   # NIFTY_SPOT | NIFTY_FUT (current-month future)
   warmup_bars: 5000           # chart bars replayed at start to rebuild strategy state
-  candle_close_delay_sec: 3   # wait after candle close before fetching candles
+  candle_close_delay_sec: 0   # wait after candle close before fetching candles
   ltp_poll_sec: 1.0           # how often spot/fut LTP is polled for SL/target monitoring
   exit_monitoring: tick       # tick = exit as soon as LTP crosses SL/target | candle_close = only at candle close
   mintick: 0.05
@@ -79,42 +79,43 @@ storage:
 strategy:
   # === 0. LOGIC VERSION ===
   # v7.4 = original logic (unchanged) | v8.0 = adds Strict Per-Trigger Lock, newest-zone retest, IDM reset on CHoCH.
+  # v8.7 = v8.0 + HTML-backtest sync: +70 pts / 12-bar quant wins, 70-pt fallback target, no loss-freeze, OB>FVG>CHoCH>IDM priority.
   # Changing this does NOT change any other setting. To use the v8.0 Pine defaults, press
-  # "Load v8.0 defaults" in the dashboard (or copy config/presets/v8.0.yaml).
-  strategy_version: "v7.4"
+  # "Load v8.0 / v8.7 defaults" in the dashboard (or copy config/presets/<version>.yaml).
+  strategy_version: "v8.7"
 
   # === 1. IDM ENGINE (TREND PULLBACK) ===
   strat1_IDM: true
-  idmTf: "15"
-  idmLookback: 3              # 2 - 10
+  idmTf: "5"
+  idmLookback: 4              # 2 - 10
   strat6_IDM_Precision: false
-  strat8_HTF_IDM_Trap: false
+  strat8_HTF_IDM_Trap: true
 
   # === 2. CHOCH ENGINE (TREND REVERSAL) ===
   strat2_CHOCH: true
-  chochStructureTf: "60"
+  chochStructureTf: "15"
   strat9_Fake_CHOCH: true
   htfSwingLength: 8           # 3 - 25
-  swingLength: 15             # 5 - 50
+  swingLength: 20             # 5 - 50
 
   # === 3. ORDER BLOCK ENGINE ===
-  strat3_OB: false
-  obTimeframe: ""
+  strat3_OB: true
+  obTimeframe: "15"
   obMitigation: "Wick Touch"  # Wick Touch | 50% Mean Threshold | Full Candle Body  (no effect in Pine, see fix_ob_mitigation)
-  maxOrderBlocks: 5           # 1 - 60
+  maxOrderBlocks: 25          # 1 - 60
 
   # === 4. FAIR VALUE GAP ENGINE ===
-  strat4_FVG: false
-  fvgTimeframe: ""            # blank = chart TF; else minutes (e.g. 15, 60) - gaps built from that timeframe's candles
-  fvgAtrMultiplier: 0.25      # min gap size = this x ATR(14); 0 = accept any gap
-  maxFvgCount: 5              # 1 - 60
+  strat4_FVG: true
+  fvgTimeframe: "15"          # blank = chart TF; else minutes (e.g. 15, 60) - gaps built from that timeframe's candles
+  fvgAtrMultiplier: 0.65      # min gap size = this x ATR(14); 0 = accept any gap
+  maxFvgCount: 25             # 1 - 60
 
   # === 5. HTF TREND & QUALITY FILTERS ===
   strat5_MTF: true
   htfTimeframe: "60"
-  strat7_PD_Filter: true
+  strat7_PD_Filter: false
   strat12_OB_Confirm: true
-  strat13_Psychology1: true
+  strat13_Psychology1: false
   strat10_Momentum_CISD: false
   minDisplacementPct: 40.0
   strat11_3Condition: false
@@ -122,17 +123,17 @@ strategy:
   filterEmaSqueeze: false
   enableChopFilter: false
   chopIndexMax: 61.8
-  enableAdxFilter: false
+  enableAdxFilter: true
   adxThreshold: 20.0
   opposingZoneBufferAtr: 1.5
   signalCooldownBars: 5
-  filterDuplicateTrades: true
+  filterDuplicateTrades: false
   strictTriggerLock: true     # v8.0 only: no new FVG/IDM/OB/CHoCH while that same trigger's trade is running (ignored in v7.4)
   allowMultiTriggerEntries: false
 
   # === 6. SWING STOP LOSS & TARGETS (Nifty points) ===
   slMode: "Fixed Points (Preset)"   # Fixed Points (Preset) | Swing High/Low | Custom Points
-  slFixedPreset: "80 Points"        # 70 Points | 80 Points | 90 Points
+  slFixedPreset: "70 Points"        # 70 Points | 80 Points | 90 Points
   slCustomPoints: 80.0
   slSwingLookback: 20         # Swing High/Low SL lookback (bars): used only when fix_sl_lookback is true (Pine ignores it)
   slBufferPoints: 5.0
@@ -144,9 +145,9 @@ strategy:
   maxTargetRr: 4.0
   enableBreakEven: true
   tp1RrMultiple: 1.0
-  strat15_LiquidityRun: false
+  strat15_LiquidityRun: true
   costPerTradePoints: 3.0
-  maxTradeDuration: 150
+  maxTradeDuration: 500
 
   # === Pine quirk fixes (false = behave exactly like TradingView) ===
   fix_ob_mitigation: false

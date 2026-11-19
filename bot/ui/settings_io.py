@@ -143,7 +143,7 @@ def add_missing_keys(saved_text: str, default_text: str) -> str:
 # inserted with values that reproduce the previous behaviour exactly (v7.4 logic, debit pairs).
 NEW_KEYS = {
     "strategy": (
-        '  strategy_version: "v7.4"     # v7.4 = original logic | v8.0 = Strict Per-Trigger Lock upgrade',
+        '  strategy_version: "v7.4"     # v7.4 = original logic | v8.0 = Strict Per-Trigger Lock | v8.7 = HTML-backtest sync',
         "  strictTriggerLock: true      # v8.0 only: no new FVG/IDM/OB/CHoCH while that same trigger's trade is running",
     ),
     "hedge": (

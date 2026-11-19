@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SETTINGS = ROOT / "config" / "settings.yaml"
 PRESETS_DIR = ROOT / "config" / "presets"
-STRATEGY_VERSIONS = ("v7.4", "v8.0")
+STRATEGY_VERSIONS = ("v7.4", "v8.0", "v8.7")
 
 
 def load_preset(version: str) -> dict:
@@ -23,7 +23,7 @@ def load_preset(version: str) -> dict:
 
 @dataclass
 class StrategySettings:
-    # 0. Logic version: "v7.4" (original, default) | "v8.0" (per-trigger lock upgrade)
+    # 0. Logic version: "v7.4" (original, default) | "v8.0" (per-trigger lock) | "v8.7" (HTML-backtest sync)
     strategy_version: str = "v7.4"
     # 1. IDM
     strat1_IDM: bool = True

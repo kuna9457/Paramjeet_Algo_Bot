@@ -1,0 +1,61 @@
+# Pine defaults of Algo_SMC_Suite_Nifty_v8.7 (strategy block only).
+# Same inputs as v8.0 except allowMultiTriggerEntries=false (one trade at a time, no cross-trigger entries).
+# v8.7 logic: +70 pts / 12-bar liquidity-decay wins, 70-pt fallback target, no loss freeze, OB>FVG>CHoCH>IDM priority.
+# Loaded by the dashboard 'Load vX defaults' button; your settings.yaml is only changed when you press it and Save.
+strategy:
+  strategy_version: v8.7
+  strat1_IDM: true
+  idmTf: '5'
+  idmLookback: 4
+  strat6_IDM_Precision: false
+  strat8_HTF_IDM_Trap: true
+  strat2_CHOCH: true
+  chochStructureTf: '15'
+  strat9_Fake_CHOCH: true
+  htfSwingLength: 8
+  swingLength: 20
+  strat3_OB: true
+  obTimeframe: '15'
+  obMitigation: Wick Touch
+  maxOrderBlocks: 25
+  strat4_FVG: true
+  fvgTimeframe: '15'
+  fvgAtrMultiplier: 0.65
+  maxFvgCount: 25
+  strat5_MTF: true
+  htfTimeframe: '60'
+  strat7_PD_Filter: false
+  strat12_OB_Confirm: true
+  strat13_Psychology1: false
+  strat10_Momentum_CISD: false
+  minDisplacementPct: 40.0
+  strat11_3Condition: false
+  strat16_POI_Confluence: false
+  filterEmaSqueeze: false
+  enableChopFilter: false
+  chopIndexMax: 61.8
+  enableAdxFilter: true
+  adxThreshold: 20.0
+  opposingZoneBufferAtr: 1.5
+  signalCooldownBars: 5
+  filterDuplicateTrades: true
+  strictTriggerLock: true
+  allowMultiTriggerEntries: false
+  slMode: Fixed Points (Preset)
+  slFixedPreset: 70 Points
+  slCustomPoints: 80.0
+  slSwingLookback: 20
+  slBufferPoints: 5.0
+  strat14_Psychology2: true
+  maxAllowedSlPoints: 160.0
+  minTargetRr: 1.5
+  subMinTargetAction: Extend to Min R:R
+  enableMaxTargetCap: false
+  maxTargetRr: 4.0
+  enableBreakEven: true
+  tp1RrMultiple: 1.0
+  strat15_LiquidityRun: true
+  costPerTradePoints: 3.0
+  maxTradeDuration: 150
+  fix_ob_mitigation: false
+  fix_sl_lookback: false

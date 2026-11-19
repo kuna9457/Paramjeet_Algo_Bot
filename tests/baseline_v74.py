@@ -12,6 +12,7 @@ from bot.strategy.engine import NexusEngine
 from tests.fakes import synthetic_1m
 
 GOLDEN = Path(__file__).parent / "data" / "v74_golden.json"
+GOLDEN_V80 = Path(__file__).parent / "data" / "v80_golden.json"
 
 M1 = synthetic_1m(days=60)
 SERIES = {"5": resample(M1, 5), "15": resample(M1, 15)}
@@ -34,12 +35,13 @@ CASES = {
 }
 
 
-def snapshot() -> dict:
+def snapshot(version: str = "v7.4", engine_cls=None) -> dict:
+    engine_cls = engine_cls or NexusEngine
     out = {}
     for name, kw in CASES.items():
         for tf, bars in SERIES.items():
-            s = replace(StrategySettings(), chart_timeframe=int(tf), **kw)
-            e = NexusEngine(s)
+            s = replace(StrategySettings(), chart_timeframe=int(tf), strategy_version=version, **kw)
+            e = engine_cls(s)
             ev = []
             for b in bars:
                 ev += e.on_bar(b)
@@ -51,3 +53,7 @@ if __name__ == "__main__":
     if sys.argv[1:] == ["write"]:
         GOLDEN.write_text(json.dumps(snapshot()))
         print("written", {k: len(v) for k, v in json.loads(GOLDEN.read_text()).items()})
+    if sys.argv[1:] == ["write-v80"]:      # run against a trusted pre-v8.7 engine copy (see tests/test_versions.py)
+        from bot.strategy._engine_pre87 import NexusEngine as Old
+        GOLDEN_V80.write_text(json.dumps(snapshot("v8.0", Old)))
+        print("written", {k: len(v) for k, v in json.loads(GOLDEN_V80.read_text()).items()})

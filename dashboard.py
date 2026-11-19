@@ -34,8 +34,8 @@ ON_RENDER = bool(os.getenv("RENDER"))   # set automatically by Render
 
 # ====================================================================================== helpers
 PINE_TITLES = {
-    "strategy_version": "Strategy Logic Version (v7.4 original / v8.0 upgrade)",
-    "strictTriggerLock": "Strict Lock Per Trigger (v8.0 only: no duplicate FVG/IDM/OB/CHoCH till its Target/SL)",
+    "strategy_version": "Strategy Logic Version (v7.4 original / v8.0 / v8.7 latest)",
+    "strictTriggerLock": "Strict Lock Per Trigger (v8.0 / v8.7: no duplicate FVG/IDM/OB/CHoCH till its Target/SL)",
     "strat1_IDM": "Enable IDM Pullback Trigger", "idmTf": "IDM Sweep Timeframe",
     "idmLookback": "IDM Minor Pivot Lookback (Bars)", "strat6_IDM_Precision": "Require Strict OB/FVG Confluence for IDM",
     "strat8_HTF_IDM_Trap": "HTF IDM Trap Filter", "strat2_CHOCH": "Enable CHoCH Reversal Trigger",
@@ -538,8 +538,12 @@ def preset_panel(flat: dict) -> None:
         except Exception as e:  # noqa
             st.error(f"Preset file missing: {e}")
             return
+        def _same(a, b):      # False/0 must not look like "" ; None and "" are the same (blank timeframe)
+            return (a in (None, "") and b in (None, "")) or (a == b and type(a) is type(b)) or \
+                   (isinstance(a, (int, float)) and isinstance(b, (int, float)) and not isinstance(a, bool)
+                    and not isinstance(b, bool) and float(a) == float(b))
         changes = {("strategy", k): v for k, v in preset.items()
-                   if ("strategy", k) in flat and str(flat[("strategy", k)] or "") != str(v if v is not None else "")}
+                   if ("strategy", k) in flat and not _same(flat[("strategy", k)], v)}
         if not changes:
             st.success(f"Your strategy settings already equal the {ver} defaults.")
             return

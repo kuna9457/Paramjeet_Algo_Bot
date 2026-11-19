@@ -69,9 +69,12 @@ def test_add_missing_keys_restores_new_settings_without_touching_saved_values():
     from bot.config import DEFAULT_SETTINGS
     from bot.ui.settings_io import add_missing_keys
     default = DEFAULT_SETTINGS.read_text(encoding="utf-8")
-    old = "\n".join(l for l in default.splitlines() if "fvgTimeframe" not in l).replace("maxFvgCount: 5", "maxFvgCount: 9")
+    import re
+    expected_fvg_tf = yaml.safe_load(default)["strategy"]["fvgTimeframe"]   # whatever the saved default is
+    old = "\n".join(l for l in default.splitlines() if "fvgTimeframe" not in l)
+    old = re.sub(r"(maxFvgCount:\s*)\d+", r"\g<1>9", old)                    # a user-changed value must survive
     merged = add_missing_keys(old, default)
     d = yaml.safe_load(merged)
-    assert d["strategy"]["fvgTimeframe"] == "" and d["strategy"]["maxFvgCount"] == 9
+    assert d["strategy"]["fvgTimeframe"] == expected_fvg_tf and d["strategy"]["maxFvgCount"] == 9
     assert merged.index("fvgTimeframe") < merged.index("maxFvgCount")
     assert add_missing_keys(merged, default) == merged

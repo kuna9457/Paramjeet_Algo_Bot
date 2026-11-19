@@ -4,6 +4,9 @@ Section numbers in comments refer to the Pine source (Algo_SMC_Suite_Nifty_v7.4)
 Logic version is chosen by StrategySettings.strategy_version:
   "v7.4" -> exact v7.4 behaviour (default, unchanged)
   "v8.0" -> adds the v8.0 changes; every v8-only line is guarded by `self.v8`.
+  "v8.7" -> everything in v8.0 plus the v8.7 changes (guarded by `self.v87`): FVG mitigation timing, CHoCH-only
+            fake-breakout filter, trigger priority OB>FVG>CHoCH+IDM>CHoCH>IDM, no loss-freeze, 70-pt fallback target,
+            POI consumed only by its own trigger, and the +70 pts / 12-bar liquidity-decay quant exits.
 The order of operations inside on_bar() is the same as the Pine script top-to-bottom order,
 because many variables are read and written in the same bar.
 `None` == Pine `na`. All bars fed to on_bar() are CLOSED bars (barstate.isconfirmed == true).
@@ -71,6 +74,27 @@ class TradeRecord:
     pnl_points: Optional[float] = None
 
 
+def trigger_name(t3: bool, t4: bool, t1: bool, t2: bool, v87: bool = False) -> str:
+    """Name of the trigger that fired. v7.4 / v8.0: CHoCH+IDM > CHoCH > IDM > OB > FVG.
+    v8.7 puts the zone triggers first: OB > FVG > CHoCH+IDM > CHoCH > IDM."""
+    if v87:
+        if t1:
+            return "OB"
+        if t2:
+            return "FVG"
+    if t3 and t4:
+        return "CHoCH+IDM"
+    if t3:
+        return "CHoCH"
+    if t4:
+        return "IDM"
+    if t1:
+        return "OB"
+    if t2:
+        return "FVG"
+    return ""
+
+
 def _tf(tf: str, chart_tf: int) -> int:
     return chart_tf if tf in ("", None) else int(tf)
 
@@ -78,7 +102,9 @@ def _tf(tf: str, chart_tf: int) -> int:
 class NexusEngine:
     def __init__(self, s: StrategySettings):
         self.s = s
-        self.v8 = str(getattr(s, "strategy_version", "v7.4")) == "v8.0"
+        ver = str(getattr(s, "strategy_version", "v7.4"))
+        self.v87 = ver == "v8.7"
+        self.v8 = ver in ("v8.0", "v8.7")          # v8.7 contains every v8.0 change
         ctf = s.chart_timeframe
         self.chart_tf = ctf
         self.bar_index = -1
@@ -680,7 +706,11 @@ class NexusEngine:
                 if not f.tested and (isTouchingNow or inRetestWindow):
                     touchBullFvgFirst = True
                     matchingBullFvgIdx = i
-                if low <= f.bottom or (f.touchBar > 0 and (bi - f.touchBar) >= 3):
+                if self.v87:   # v8.7: only a real break below the gap, and a longer 4-bar reaction window
+                    fvg_done = low < f.bottom or (f.touchBar > 0 and (bi - f.touchBar) > 4)
+                else:
+                    fvg_done = low <= f.bottom or (f.touchBar > 0 and (bi - f.touchBar) >= 3)
+                if fvg_done:
                     f.mitigated = True
         for i in self._zone_order(self.bearFvgList):
             f = self.bearFvgList[i]
@@ -697,7 +727,11 @@ class NexusEngine:
                 if not f.tested and (isTouchingNow or inRetestWindow):
                     touchBearFvgFirst = True
                     matchingBearFvgIdx = i
-                if high >= f.top or (f.touchBar > 0 and (bi - f.touchBar) >= 3):
+                if self.v87:
+                    fvg_done = high > f.top or (f.touchBar > 0 and (bi - f.touchBar) > 4)
+                else:
+                    fvg_done = high >= f.top or (f.touchBar > 0 and (bi - f.touchBar) >= 3)
+                if fvg_done:
                     f.mitigated = True
 
         # ============================================================ 7. DEALING RANGE & FILTERS
@@ -780,10 +814,12 @@ class NexusEngine:
         passFilter_3Cond_Sell = (not s.strat11_3Condition) or (
             passFilter_MTF_Sell and inPremiumZone and (touchBearObFirst or touchBearFvgFirst) and confirmedBearCandle)
 
-        allFiltersPass_Buy = (passFilter_PD_Buy and passFilter_MTF_Buy and passFilter_Trap_Buy and passFilter_Strat9_Buy
+        allFiltersPass_Buy = (passFilter_PD_Buy and passFilter_MTF_Buy and passFilter_Trap_Buy
+                              and (self.v87 or passFilter_Strat9_Buy)      # v8.7: fake-breakout check applies to CHoCH only
                               and hasDisplacement and passFilter_OB_Confirm_Buy and passFilter_Supply_Buy
                               and passFilter_Chop and passFilter_3Cond_Buy and passFilter_Strat16_Buy)
-        allFiltersPass_Sell = (passFilter_PD_Sell and passFilter_MTF_Sell and passFilter_Trap_Sell and passFilter_Strat9_Sell
+        allFiltersPass_Sell = (passFilter_PD_Sell and passFilter_MTF_Sell and passFilter_Trap_Sell
+                               and (self.v87 or passFilter_Strat9_Sell)
                                and hasDisplacement and passFilter_OB_Confirm_Sell and passFilter_Demand_Sell
                                and passFilter_Chop and passFilter_3Cond_Sell and passFilter_Strat16_Sell)
 
@@ -801,7 +837,7 @@ class NexusEngine:
             self.chochZoneTouchedBull = True
         chochRetestBuy = (not self.bullChochRetested and self.chochZoneTouchedBull and bi >= self.lastBullChochBar + 2
                           and (bi - self.lastBullChochBar) <= 35 and confirmedBullCandle)
-        t3_Bull = s.strat2_CHOCH and chochRetestBuy
+        t3_Bull = s.strat2_CHOCH and chochRetestBuy and (not self.v87 or passFilter_Strat9_Buy)
 
         chochLevelRetestSell = ge(high, sub(nz(self.lastBrokenChochLow, low), tol)) and high <= nz(protectedHigh, high + 1000.0)
         chochPoiRetestSell = touchBearObFirst or touchBearFvgFirst
@@ -810,7 +846,7 @@ class NexusEngine:
             self.chochZoneTouchedBear = True
         chochRetestSell = (not self.bearChochRetested and self.chochZoneTouchedBear and bi >= self.lastBearChochBar + 2
                            and (bi - self.lastBearChochBar) <= 35 and confirmedBearCandle)
-        t3_Bear = s.strat2_CHOCH and chochRetestSell
+        t3_Bear = s.strat2_CHOCH and chochRetestSell and (not self.v87 or passFilter_Strat9_Sell)
 
         hasValidBullPoi = touchBullObFirst or touchBullFvgFirst
         hasValidBearPoi = touchBearObFirst or touchBearFvgFirst
@@ -826,19 +862,11 @@ class NexusEngine:
 
         buyLossFreeze = self.lastLossDir == 1 and (bi - self.lastLossBarIndex) < 15 and not isBullishChoch
         sellLossFreeze = self.lastLossDir == -1 and (bi - self.lastLossBarIndex) < 15 and not isBearishChoch
+        if self.v87:   # v8.7: anti-revenge loss freeze removed
+            buyLossFreeze = sellLossFreeze = False
 
         def trig_name(t3, t4, t1, t2):
-            if t3 and t4:
-                return "CHoCH+IDM"
-            if t3:
-                return "CHoCH"
-            if t4:
-                return "IDM"
-            if t1:
-                return "OB"
-            if t2:
-                return "FVG"
-            return ""
+            return trigger_name(t3, t4, t1, t2, self.v87)
 
         candBuyTrig = trig_name(t3_Bull, t4_Bull, t1_Bull, t2_Bull)
         candSellTrig = trig_name(t3_Bear, t4_Bear, t1_Bear, t2_Bear)
@@ -880,10 +908,10 @@ class NexusEngine:
                 self._open(1, candBuyTrig, calcEntry, calcSl, slDist, calcTarget, plannedRr, tstr, events)
                 if self.v8:
                     self._set_trigger_locks(candBuyTrig, 1, calcSl, calcTarget)
-                if 0 <= matchingBullObIdx < len(self.bullObList):
+                if 0 <= matchingBullObIdx < len(self.bullObList) and (not self.v87 or "OB" in candBuyTrig):
                     self.bullObList[matchingBullObIdx].tested = True
                     self.bullObList[matchingBullObIdx].mitigated = True
-                if 0 <= matchingBullFvgIdx < len(self.bullFvgList):
+                if 0 <= matchingBullFvgIdx < len(self.bullFvgList) and (not self.v87 or "FVG" in candBuyTrig):
                     self.bullFvgList[matchingBullFvgIdx].tested = True
                     self.bullFvgList[matchingBullFvgIdx].mitigated = True
                 self.lastBullSweepBar = -100
@@ -903,10 +931,10 @@ class NexusEngine:
                 self._open(-1, candSellTrig, calcEntry, calcSl, slDist, calcTarget, plannedRr, tstr, events)
                 if self.v8:
                     self._set_trigger_locks(candSellTrig, -1, calcSl, calcTarget)
-                if 0 <= matchingBearObIdx < len(self.bearObList):
+                if 0 <= matchingBearObIdx < len(self.bearObList) and (not self.v87 or "OB" in candSellTrig):
                     self.bearObList[matchingBearObIdx].tested = True
                     self.bearObList[matchingBearObIdx].mitigated = True
-                if 0 <= matchingBearFvgIdx < len(self.bearFvgList):
+                if 0 <= matchingBearFvgIdx < len(self.bearFvgList) and (not self.v87 or "FVG" in candSellTrig):
                     self.bearFvgList[matchingBearFvgIdx].tested = True
                     self.bearFvgList[matchingBearFvgIdx].mitigated = True
                 self.lastBearSweepBar = -100
@@ -1024,7 +1052,10 @@ class NexusEngine:
                 dist = (p - calcEntry) * d
                 if dist > 0 and dist < best:
                     best, calcTarget = dist, p
-        if calcTarget is None:
+        if self.v87:   # v8.7: no swing target, or one further than 90 pts -> fixed 70-pt target
+            if calcTarget is None or (calcTarget - calcEntry) * d > 90.0:
+                calcTarget = calcEntry + d * 70.0
+        elif calcTarget is None:
             calcTarget = calcEntry + d * slDist * 2.0
         targetDist = (calcTarget - calcEntry) * d
         plannedRr = targetDist / slDist if slDist > 0 else 1.5
@@ -1086,12 +1117,31 @@ class NexusEngine:
                 self.lastLossDir = d
             self._exit(d, "CHOCH", close, pnl / denom, pnl, tstr, events)
 
+        # v8.7 "options quant" win: target, OR +/-70 pts from entry, OR >= 12 bars held with >= +/-45 pts open profit
+        quant_px, quant_reason = None, ""
+        if self.v87:
+            held = bi - self.lastSignalBarIndex
+            if d == 1:
+                if high >= self.targetPrice or open_ >= self.targetPrice:
+                    quant_px, quant_reason = self.targetPrice, "TARGET"
+                elif high >= self.entryPrice + 70.0:
+                    quant_px, quant_reason = self.entryPrice + 70.0, "QUANT_70"
+                elif held >= 12 and close >= self.entryPrice + 45.0:
+                    quant_px, quant_reason = close, "DECAY_12"
+            else:
+                if low <= self.targetPrice or open_ <= self.targetPrice:
+                    quant_px, quant_reason = self.targetPrice, "TARGET"
+                elif low <= self.entryPrice - 70.0:
+                    quant_px, quant_reason = self.entryPrice - 70.0, "QUANT_70"
+                elif held >= 12 and close <= self.entryPrice - 45.0:
+                    quant_px, quant_reason = close, "DECAY_12"
+
         if d == 1:
             collision = high >= self.tp1Price and low <= self.slPrice
-            tp1_touch = high >= self.tp1Price
+            tp1_touch = high >= self.tp1Price or (self.v87 and high >= self.entryPrice + 70.0)
         else:
             collision = low <= self.tp1Price and high >= self.slPrice
-            tp1_touch = low <= self.tp1Price
+            tp1_touch = low <= self.tp1Price or (self.v87 and low <= self.entryPrice - 70.0)
         if tp1_touch and not self.tp1Hit and not collision:
             self.tp1Hit = True
             self.tp1HitBarIndex = bi
@@ -1127,6 +1177,11 @@ class NexusEngine:
                 self.lastLossDir = d
                 lossPoints = (self.entryPrice - sl_exit_px) * d
                 self._exit(d, "SL", sl_exit_px, -((lossPoints + cost) / denom), -lossPoints - cost, tstr, events)
+        elif self.v87 and self.activeTradeDir == d and quant_px is not None:
+            self.winTradesCount += 1
+            realized = max(1.0, self.currentTradeRr) - cost / denom
+            pnl = (quant_px - self.entryPrice) * d - cost
+            self._exit(d, quant_reason, quant_px, realized, pnl, tstr, events)
         elif self.activeTradeDir == d and tgt_hit:
             self.winTradesCount += 1
             realized = self.currentTradeRr - cost / denom
@@ -1136,6 +1191,16 @@ class NexusEngine:
             self.timeTradesCount += 1
             pnl = (close - self.entryPrice) * d - cost
             self._exit(d, "TIME", close, pnl / denom, pnl, tstr, events)
+
+    def effective_target(self):
+        """Price at which the open trade is a win on a live tick. v8.7 books a win at +/-70 pts, so it is the nearer of
+        the planned target and entry +/- 70; earlier versions use the planned target."""
+        if self.targetPrice is None:
+            return None
+        if self.v87 and self.entryPrice is not None and self.activeTradeDir:
+            d = self.activeTradeDir
+            return min(self.targetPrice, self.entryPrice + 70.0) if d == 1 else max(self.targetPrice, self.entryPrice - 70.0)
+        return self.targetPrice
 
     # ------------------------------------------------------------------ reporting
     def stats(self) -> Dict[str, object]:
