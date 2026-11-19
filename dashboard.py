@@ -21,12 +21,12 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv, set_key
 
-from bot.config import DEFAULT_SETTINGS, ROOT, env, load_settings
+from bot.config import DEFAULT_SETTINGS, ROOT, STRATEGY_VERSIONS, env, load_preset, load_settings
 from bot.data.candle import now_ist
 from bot.services.notifier import Notifier
 from bot.services.storage import LocalStorage, make_storage
 from bot.services.tokens import ENV_KEYS, save_token, token_day
-from bot.ui import charts, process, settings_io
+from bot.ui import charts, process, settings_io, signal_view
 
 st.set_page_config(page_title="Nexus SMC Bot", page_icon="📈", layout="wide")
 load_dotenv(ROOT / ".env", override=True)
@@ -34,16 +34,18 @@ ON_RENDER = bool(os.getenv("RENDER"))   # set automatically by Render
 
 # ====================================================================================== helpers
 PINE_TITLES = {
+    "strategy_version": "Strategy Logic Version (v7.4 original / v8.0 upgrade)",
+    "strictTriggerLock": "Strict Lock Per Trigger (v8.0 only: no duplicate FVG/IDM/OB/CHoCH till its Target/SL)",
     "strat1_IDM": "Enable IDM Pullback Trigger", "idmTf": "IDM Sweep Timeframe",
     "idmLookback": "IDM Minor Pivot Lookback (Bars)", "strat6_IDM_Precision": "Require Strict OB/FVG Confluence for IDM",
     "strat8_HTF_IDM_Trap": "HTF IDM Trap Filter", "strat2_CHOCH": "Enable CHoCH Reversal Trigger",
     "chochStructureTf": "CHoCH Structure Timeframe", "strat9_Fake_CHOCH": "Fake Breakout Filter (Body Close Required)",
     "htfSwingLength": "CHoCH Structure Pivot Lookback", "swingLength": "Local Chart Pivot Lookback (If Chart TF)",
     "strat3_OB": "Enable Order Block (OB) Trigger", "obTimeframe": "Order Block Timeframe (blank = chart TF)",
-    "obMitigation": "OB Mitigation Style", "maxOrderBlocks": "Max Active OB Boxes Stored",
+    "obMitigation": "OB Mitigation Style", "maxOrderBlocks": "Max Stored OB Boxes (v8.0 default 25, max 60)",
     "strat4_FVG": "Enable Fair Value Gap (FVG) Trigger", "fvgTimeframe": "Fair Value Gap Timeframe (blank = chart TF)",
     "fvgAtrMultiplier": "FVG Min Gap Size (x ATR)",
-    "maxFvgCount": "Max Active FVGs Stored",
+    "maxFvgCount": "Max Stored FVG Boxes (v8.0 default 25, max 60)",
     "strat5_MTF": "Enable HTF Trend Filter (60m/15m Alignment)", "htfTimeframe": "HTF Macro Trend Timeframe",
     "strat7_PD_Filter": "Premium & Discount Filter (Strict 50% Rule)",
     "strat12_OB_Confirm": "Candlestick Confirmation (Rejection Wick + HH/LL)",
@@ -54,7 +56,7 @@ PINE_TITLES = {
     "chopIndexMax": "Max Chop Index Ceiling", "enableAdxFilter": "Enable ADX Trend Strength Filter",
     "adxThreshold": "ADX Strength Threshold", "opposingZoneBufferAtr": "Opposing Zone Buffer Distance (ATR)",
     "signalCooldownBars": "Signal Cooldown Bars", "filterDuplicateTrades": "Wait for Active Trade to Close Before New Entry",
-    "allowMultiTriggerEntries": "Allow Multi-Trigger Pyramiding (CHoCH + IDM)", "slMode": "Stop Loss Mode",
+    "allowMultiTriggerEntries": "Allow Cross-Trigger Entries / Pyramiding (opens extra combos live)", "slMode": "Stop Loss Mode",
     "slFixedPreset": "Fixed SL Preset", "slCustomPoints": "Custom SL Points (If Custom Selected)",
     "slSwingLookback": "Swing High/Low SL Lookback (Bars)", "slBufferPoints": "SL Safety Buffer Points", "strat14_Psychology2": "Pre-Sweep SL Protection (Behind Sweep Extreme)",
     "maxAllowedSlPoints": "Maximum Allowed SL Distance (Points)", "minTargetRr": "Minimum Target R:R Multiple",
@@ -76,6 +78,8 @@ CHOICES = {
     "hedge.buy_strike_rule": ["any", "ends_with_00", "ends_with_50"],
     "hedge.sell_strike_rule": ["ends_with_50", "ends_with_00", "any"],
     "storage.backend": ["mongo", "local"],
+    "strategy.strategy_version": list(STRATEGY_VERSIONS),
+    "hedge.pair_mode": ["debit", "credit"],
     "strategy.idmTf": TF_OPTS, "strategy.chochStructureTf": TF_OPTS, "strategy.obTimeframe": TF_OPTS, "strategy.fvgTimeframe": TF_OPTS,
     "strategy.htfTimeframe": TF_OPTS,
     "strategy.obMitigation": ["Wick Touch", "50% Mean Threshold", "Full Candle Body"],
@@ -194,7 +198,7 @@ def _hms(x) -> str:
     return "" if t is None or pd.isna(t) else t.strftime("%H:%M:%S")
 
 
-def trades_today_panel(today_c: list, events: list) -> None:
+def trades_today_panel(today_c: list, events: list, actions: list | None = None) -> None:
     """Today's option combos (the 'trade punches') and strategy signals, newest first."""
     st.subheader("🧾 Trades today")
     if not today_c:
@@ -213,14 +217,58 @@ def trades_today_panel(today_c: list, events: list) -> None:
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
     st.subheader("🔔 Signals & events today")
+    signals_panel(events, today_c, actions or [], key="today")
+
+
+def signals_panel(events: list, combos: list, actions: list, key: str) -> None:
+    """Every strategy signal with what the bot did: option legs, premiums, net credit/debit, exit and P&L."""
     if not events:
-        st.info("No strategy signals yet today.")
-    else:
-        rows = [{"time": _hms(e.get("time")), "event": e.get("kind"), "direction": fmt_dir(e.get("direction")),
-                 "trigger": e.get("trigger"), "price": e.get("price"), "SL": e.get("sl"), "target": e.get("target"),
-                 "reason": e.get("reason"), "pts": e.get("pnl_points"), "mode": e.get("mode")}
-                for e in sorted(events, key=lambda x: str(x.get("time")), reverse=True)]
-        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        st.info("No strategy signals yet.")
+        return
+    rows = signal_view.signal_rows(events, combos, actions)
+    if rows:
+        summ = signal_view.summarize(rows)
+        cols = st.columns(min(len(summ) + 1, 6))
+        cols[0].metric("Signals", len(rows))
+        for i, (k, v) in enumerate(sorted(summ.items()), start=1):
+            if i < len(cols):
+                cols[i].metric(k.title(), v)
+        df = pd.DataFrame(rows)
+        st.dataframe(df, hide_index=True, width="stretch")
+        st.caption("TRADED = option combo placed · SKIPPED = signal not traded (reason shown) · FAILED = order legs did not "
+                   "fill. Premium columns show scan price → actual fill price. Net premium: CREDIT = you received, "
+                   "DEBIT = you paid.")
+        by_ev = {signal_view.action_id(e): e for e in events if e.get("kind") == "ENTRY"}
+        act_by = {a.get("id"): a for a in actions}
+        pick = st.selectbox("Signal details", ["—"] + [f"{r['time']} · {r['signal']} · {r['trigger']}" for r in rows],
+                            key=f"sigpick_{key}")
+        if pick != "—":
+            r = rows[[f"{x['time']} · {x['signal']} · {x['trigger']}" for x in rows].index(pick)]
+            ev = next((e for e in events if e.get("kind") == "ENTRY"
+                       and str(e.get("time", ""))[:19].replace("T", " ") == r["time"]
+                       and e.get("trigger") == r["trigger"] and SIDE_OF(e) == r["signal"]), None)
+            combo = signal_view.find_combo(ev, combos, act_by.get(signal_view.action_id(ev))) if ev else None
+            act = act_by.get(signal_view.action_id(ev)) if ev else None
+            for line in signal_view.timeline(combo or {}, ev or {}, act):
+                st.markdown(f"- {line}")
+            if combo:
+                st.markdown("**Option legs per broker**")
+                st.dataframe(pd.DataFrame(signal_view.leg_rows(combo)), hide_index=True, width="stretch")
+            if act and act.get("top_candidates"):
+                st.markdown("**Best matching pairs found at scan time**")
+                st.dataframe(pd.DataFrame(act["top_candidates"]), hide_index=True, width="stretch")
+    others = [e for e in events if e.get("kind") != "ENTRY"]
+    if others:
+        with st.expander(f"Other strategy events ({len(others)}): exits, TP1, break-even moves"):
+            orows = [{"time": _hms(e.get("time")), "event": e.get("kind"), "direction": fmt_dir(e.get("direction")),
+                      "trigger": e.get("trigger"), "price": e.get("price"), "SL": e.get("sl"), "target": e.get("target"),
+                      "reason": e.get("reason"), "pts": e.get("pnl_points"), "mode": e.get("mode")}
+                     for e in sorted(others, key=lambda x: str(x.get("time")), reverse=True)]
+            st.dataframe(pd.DataFrame(orows), hide_index=True, width="stretch")
+
+
+def SIDE_OF(e: dict) -> str:
+    return signal_view.SIDE.get(e.get("direction"), "")
 
 
 def activity_log_panel() -> None:
@@ -349,7 +397,8 @@ def page_control():
         st.divider()
         left, right = st.columns([3, 2], gap="medium")
         with left:
-            trades_today_panel(today_c, [e for e in st_.find("events") if str(e.get("time", "")).startswith(today)])
+            trades_today_panel(today_c, [e for e in st_.find("events") if str(e.get("time", "")).startswith(today)],
+                               st_.find("signal_actions"))
         with right:
             st.subheader("📟 Activity log")
             activity_log_panel()
@@ -473,14 +522,60 @@ def _widget(path, value, comments, prefix="set:"):
     return st.text_input(label, value="" if value is None else str(value), help=help_, key=wkey)
 
 
+def preset_panel(flat: dict) -> None:
+    """Strategy logic version + one-click load of a version's Pine default settings."""
+    cur = str(flat.get(("strategy", "strategy_version")) or "v7.4")
+    st.markdown(f"**Strategy logic version in use: `{cur}`**")
+    with st.expander("🔁 Strategy version presets (load all Pine default settings of v7.4 or v8.0)"):
+        st.caption("Changing only **Strategy Logic Version** (Strategy tab) switches the logic and keeps all your other "
+                   "settings. Loading a preset below overwrites every **strategy** setting with that version's Pine "
+                   "defaults (bot / broker / hedge / safety settings are untouched). The previous file is kept as a backup "
+                   "so you can undo with ↩ Restore.")
+        ver = st.selectbox("Preset", list(STRATEGY_VERSIONS), index=list(STRATEGY_VERSIONS).index(cur)
+                           if cur in STRATEGY_VERSIONS else 0, key="preset_ver")
+        try:
+            preset = load_preset(ver)
+        except Exception as e:  # noqa
+            st.error(f"Preset file missing: {e}")
+            return
+        changes = {("strategy", k): v for k, v in preset.items()
+                   if ("strategy", k) in flat and str(flat[("strategy", k)] or "") != str(v if v is not None else "")}
+        if not changes:
+            st.success(f"Your strategy settings already equal the {ver} defaults.")
+            return
+        st.dataframe(pd.DataFrame([{"setting": p[1], "current": str(flat[p]), f"{ver} default": str(v)}
+                                   for p, v in changes.items()]), width="stretch", hide_index=True)
+        if ver == "v8.0" and preset.get("allowMultiTriggerEntries"):
+            st.warning("v8.0 defaults turn ON cross-trigger entries: in paper/live the bot can hold more than one "
+                       "options combo at the same time (more margin).")
+        sure = st.checkbox(f"I want to replace {len(changes)} strategy settings with the {ver} defaults",
+                           key="preset_sure")
+        if st.button(f"Load {ver} defaults", type="primary", disabled=not sure):
+            try:
+                settings_io.save(changes)
+                _push_settings()
+                for k in [k for k in st.session_state if str(k).startswith("set:") or k == "preset_sure"]:
+                    del st.session_state[k]
+                st.success(f"{ver} defaults loaded. Restart the bot to apply.")
+                st.rerun()
+            except Exception as e:  # noqa
+                st.error(f"Not loaded – {e}")
+
+
 def page_settings():
     st.title("⚙️ Settings")
+    try:
+        if settings_io.ensure_new_keys():
+            _push_settings()
+    except Exception as e:  # noqa
+        st.warning(f"Could not add new strategy settings to settings.yaml: {e}")
     raw, text = settings_io.read_raw()
     comments, groups = settings_io.scan(text)
     flat = settings_io.flatten(raw)
     doc, proc, age, running = bot_status()
     if running:
         st.info("The bot is running. Saved changes apply after you restart it (Stop → Start on Bot control).")
+    preset_panel(flat)
     sections = [k for k in SECTION_TITLES if k in raw]
     new_vals = {}
     with st.form("settings"):
@@ -757,13 +852,23 @@ def page_history():
         if not evs:
             st.info("No strategy events yet.")
         else:
-            e = pd.DataFrame(evs)
-            keep = [c for c in ["time", "kind", "direction", "trigger", "price", "sl", "target", "tp1", "rr", "reason",
-                                "pnl_points", "mode"] if c in e]
-            e = e[keep].sort_values("time", ascending=False)
-            kinds = st.multiselect("Event types", sorted(e["kind"].unique()), default=sorted(e["kind"].unique()))
-            st.dataframe(e[e["kind"].isin(kinds)], hide_index=True, width="stretch")
-            st.download_button("⬇ Download CSV", e.to_csv(index=False), "events.csv")
+            acts = st_.find("signal_actions")
+            days = sorted({str(x.get("time", ""))[:10] for x in evs if x.get("time")}, reverse=True)
+            f1, f2 = st.columns(2)
+            day_pick = f1.multiselect("Days", days, default=days[:7])
+            mode_pick = f2.selectbox("Mode", ["all", "paper", "live"], key="sigmode")
+            sel = [x for x in evs if str(x.get("time", ""))[:10] in day_pick and mode_pick in ("all", x.get("mode"))]
+            signals_panel(sel, combos, acts, key="history")
+            e = pd.DataFrame(sel)
+            if not e.empty:
+                keep = [c for c in ["time", "kind", "direction", "trigger", "price", "sl", "target", "tp1", "rr", "reason",
+                                    "pnl_points", "mode"] if c in e]
+                st.download_button("⬇ Download events CSV", e[keep].sort_values("time", ascending=False).to_csv(index=False),
+                                   "events.csv")
+            rows = signal_view.signal_rows(sel, combos, acts)
+            if rows:
+                st.download_button("⬇ Download signals + option trades CSV", pd.DataFrame(rows).to_csv(index=False),
+                                   "signals_with_trades.csv")
     with tabs[2]:
         if df.empty or (df["status"] == "CLOSED").sum() == 0:
             st.info("No closed combos yet.")
@@ -832,7 +937,7 @@ def page_backtest():
     lots = max(1, int(sum(int(lot_map.get(b, 1)) for b in enabled))) if enabled else 1
     lot_size = NIFTY_LOT_SIZE
     with st.expander("Settings used by this backtest (edit them on the ⚙️ Settings page)", expanded=False):
-        st.markdown(f"Strategy: all **Pine inputs** from Settings · chart timeframe **{s.strategy.chart_timeframe}m** · "
+        st.markdown(f"Strategy: logic **{s.strategy.strategy_version}** · all **Pine inputs** from Settings · chart timeframe **{s.strategy.chart_timeframe}m** · "
                     f"lots **{lots}** ({', '.join(f'{b}: {lot_map.get(b, 1)}' for b in enabled) or 'none enabled'}) × "
                     f"lot size {lot_size}")
         st.caption("₹ ≈ Nifty points × lots × lot size (BUY CALL + SELL PUT moves about 1:1 with Nifty). Option "

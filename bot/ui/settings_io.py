@@ -139,6 +139,39 @@ def add_missing_keys(saved_text: str, default_text: str) -> str:
     return "".join(lines)
 
 
+# Keys added after the first release. Older settings.yaml files (kept by the installer on update) get them
+# inserted with values that reproduce the previous behaviour exactly (v7.4 logic, debit pairs).
+NEW_KEYS = {
+    "strategy": (
+        '  strategy_version: "v7.4"     # v7.4 = original logic | v8.0 = Strict Per-Trigger Lock upgrade',
+        "  strictTriggerLock: true      # v8.0 only: no new FVG/IDM/OB/CHoCH while that same trigger's trade is running",
+    ),
+    "hedge": (
+        "  pair_mode: debit            # debit = net debit (range_min/max) | credit = you RECEIVE a net credit",
+        "  credit_min: 10              # CREDIT mode: net credit range (points): SellLegLTP - BuyLegLTP",
+        "  credit_max: 15",
+        "  sell_max_premium: 55        # CREDIT mode: sell leg premium <= this (0 = no cap)",
+        "  buy_min_premium: 35         # CREDIT mode: buy leg premium band (0 = no limit on that side)",
+        "  buy_max_premium: 40",
+    ),
+}
+NEW_STRATEGY_KEYS = NEW_KEYS["strategy"]   # kept for backwards compatibility
+NL = chr(10)
+
+
+def ensure_new_keys(path: Path = DEFAULT_SETTINGS) -> bool:
+    """Insert NEW_KEYS missing from an older settings.yaml. Saved values are never changed."""
+    path = Path(path)
+    text = path.read_text(encoding="utf-8")
+    default = "".join(f"{sec}:" + NL + NL.join(lines) + NL for sec, lines in NEW_KEYS.items())
+    merged = add_missing_keys(text, default)
+    if merged == text:
+        return False
+    path.write_text(merged, encoding="utf-8")
+    load_settings(path)  # validate
+    return True
+
+
 def read_raw(path: Path = DEFAULT_SETTINGS) -> Tuple[dict, str]:
     text = Path(path).read_text(encoding="utf-8")
     return yaml.safe_load(text) or {}, text

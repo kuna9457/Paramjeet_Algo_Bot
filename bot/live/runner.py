@@ -23,7 +23,7 @@ from ..data.candle import (bucket_bounds, closed_only, now_ist, resample, sessio
                            session_open_dt)
 from ..hedge.executor import ComboExecutor
 from ..hedge.expiry import select_expiry
-from ..hedge.scanner import find_pair, strike_window
+from ..hedge.scanner import find_pair, pair_mode, range_text, strike_window
 from ..services.notifier import Notifier
 from ..services.storage import Storage
 from ..services.tokens import get_token
@@ -111,8 +111,10 @@ class LiveBot:
         self.last_bar_time = bars[-1].time if bars else None
         st = self.engine.stats()
         pos = self.engine.position()
-        log.info("Warm-up done: %d bars, last %s | stats %s | position %s", len(bars), self.last_bar_time, st, pos)
-        self.notify.send(f"Nexus SMC bot started ({self.mode})\nWarm-up {len(bars)} bars, last bar {self.last_bar_time}\n"
+        ver = self.S.strategy.strategy_version
+        log.info("Warm-up done: %d bars, last %s | logic %s | stats %s | position %s", len(bars), self.last_bar_time,
+                 ver, st, pos)
+        self.notify.send(f"Nexus SMC bot started ({self.mode}) · logic {ver}\nWarm-up {len(bars)} bars, last bar {self.last_bar_time}\n"
                          f"Trend: {'BULL' if self.engine.trendBias == 1 else 'BEAR' if self.engine.trendBias == -1 else '-'}"
                          f" | Strategy position: {pos['dir']}\nBacktest stats: {st}")
         self.save_chart()
@@ -177,51 +179,87 @@ class LiveBot:
         n = now_ist()
         sf = self.S.safety
         if self.kill_active():
-            return self.notify.send("⛔ Kill switch active - signal not traded")
+            return self._skip(ev, "Kill switch active", "⛔ Kill switch active - signal not traded")
         if not self._in_window(n):
-            return self.notify.send("⏸ Outside entry time window - signal not traded")
+            return self._skip(ev, "Outside entry time window", "⏸ Outside entry time window - signal not traded")
         if int(sf.get("max_trades_per_day") or 0) and len(self.today_combos()) >= int(sf.max_trades_per_day):
-            return self.notify.send("⏸ Max trades per day reached - signal not traded")
+            return self._skip(ev, "Max trades per day reached", "⏸ Max trades per day reached - signal not traded")
         if float(sf.get("max_daily_loss_rs") or 0):
             realized = sum(sum((c.get("pnl") or {}).values()) for c in self.today_combos() if c.get("status") == "CLOSED")
             if realized <= -abs(float(sf.max_daily_loss_rs)):
-                return self.notify.send("⏸ Max daily loss reached - signal not traded")
+                return self._skip(ev, "Max daily loss reached", "⏸ Max daily loss reached - signal not traded")
         # opposite combos (only possible when duplicate filter is off) are closed first
         for c in self.open_combos():
             if c["direction"] != ev.direction:
                 self._close(c, "REVERSE")
         if self.open_combos() and not self.S.strategy.allowMultiTriggerEntries:
-            return self.notify.send("Combo already open - not adding")
-        self.open_hedge(ev)
+            return self._skip(ev, "Combo already open (multi-trigger entries off)", "Combo already open - not adding")
+        res = self.open_hedge(ev) or {}
+        self._log_action(ev, res.get("outcome", "TRADED"), res.get("reason", ""),
+                         **{k: v for k, v in res.items() if k not in ("outcome", "reason")})
 
-    def open_hedge(self, ev: Event):
+    # ------------------------------------------------------------------ per-signal decision log (shown in the dashboard)
+    @staticmethod
+    def sig_id(ev: Event, mode: str) -> str:
+        return f"{ev.time}|{ev.direction}|{ev.trigger}|{mode}"
+
+    def _log_action(self, ev: Event, outcome: str, reason: str = "", **extra):
+        """What the bot did with a strategy signal: TRADED / SKIPPED / FAILED and why. Never blocks trading."""
+        try:
+            doc = {"id": self.sig_id(ev, self.mode), "signal_time": ev.time, "direction": ev.direction,
+                   "trigger": ev.trigger, "mode": self.mode, "outcome": outcome, "reason": reason,
+                   "decided_at": now_ist().isoformat(), **extra}
+            self.storage.upsert("signal_actions", {"id": doc["id"]}, doc)
+        except Exception:  # noqa
+            log.exception("could not store signal action")
+
+    def _skip(self, ev: Event, reason: str, msg: str):
+        self._log_action(ev, "SKIPPED", reason)
+        self.notify.send(msg)
+
+    def open_hedge(self, ev: Event) -> dict:
+        """Pick the option pair and trade it. Returns the decision for the signal log."""
         H = self.S.hedge
+        mode = pair_mode(H)
         expiry = select_expiry(self.data.option_expiries(), H.expiry_mode, now_ist().date(),
                                H.get("expiry_date", ""), bool(H.get("use_next_expiry_on_expiry_day", True)))
         if not expiry:
-            return self.notify.send("❌ No valid expiry found - trade skipped")
+            self.notify.send("❌ No valid expiry found - trade skipped")
+            return {"outcome": "SKIPPED", "reason": "No valid expiry found", "pair_mode": mode}
         deadline = time.time() + float(H.get("max_rescan_sec", 60))
-        pair = None
+        pair, matches, scans, ref = None, [], 0, ev.price
         while True:
             ref = self.data.ltp([self.signal_inst]).get(self.signal_inst.key) or ev.price
             _, strikes = strike_window(ref, int(H.get("strike_step", 50)), int(H.get("strike_scan_width", 10)))
             chain = self.data.option_chain(expiry, strikes)
             pair, matches = find_pair(ev.direction, chain, ref, H)
+            scans += 1
             if pair or time.time() >= deadline or self.stop_requested():
                 break
-            log.info("No pair in range %s-%s yet, rescanning", H.range_min, H.range_max)
+            log.info("No pair (%s) yet, rescanning", range_text(H))
             time.sleep(float(H.get("rescan_interval_sec", 5)))
+        base = {"pair_mode": mode, "expiry": expiry.isoformat(), "scan_ref_price": ref, "scan_rounds": scans,
+                "wanted": range_text(H)}
         if not pair:
-            return self.notify.send(f"⚠ No option pair with premium difference {H.range_min}-{H.range_max} "
-                                    f"found for {expiry} - trade skipped")
+            self.notify.send(f"⚠ No option pair ({range_text(H)}) found for {expiry} after {scans} scans - trade skipped")
+            return {**base, "outcome": "SKIPPED", "reason": f"No option pair matched ({range_text(H)})"}
+        top = [{"buy": f"{int(m.buy.strike)} {m.buy.opt_type}", "buy_ltp": m.buy.ltp,
+                "sell": f"{int(m.sell.strike)} {m.sell.opt_type}", "sell_ltp": m.sell.ltp, "net": round(m.net, 2)}
+               for m in matches[:5]]
+        base.update(candidates=pair.candidates, top_candidates=top)
         self.notify.send(f"🔎 Pair selected ({pair.candidates} matches), expiry {expiry}:\n{pair.describe()}")
         combo = self.executor.open_combo(pair, expiry, {**ev.to_dict(), "mode": self.mode})
         lines = [f"{'✅' if combo['status'] == 'OPEN' else '❌'} Combo {combo['id']} {combo['status']}"]
         for n, leg in combo["legs"].items():
+            net = leg.get("net_entry")
+            net_txt = "" if net is None else f" | net {'CREDIT' if net >= 0 else 'DEBIT'} {abs(net):.2f}/unit"
             lines.append(f"{n}: {leg['status']} | BUY {leg['buy'].get('symbol')} x{leg['buy'].get('qty', 0)} @ "
                          f"{leg['buy'].get('entry', 0)} | SELL {leg['sell'].get('symbol')} x{leg['sell'].get('qty', 0)} @ "
-                         f"{leg['sell'].get('entry', 0)} {leg.get('msg', '')}")
+                         f"{leg['sell'].get('entry', 0)}{net_txt} {leg.get('msg', '')}")
         self.notify.send("\n".join(lines))
+        ok = combo["status"] == "OPEN"
+        return {**base, "outcome": "TRADED" if ok else "FAILED", "combo_id": combo["id"],
+                "reason": "" if ok else "; ".join(f"{n}: {l.get('msg', '').strip()}" for n, l in combo["legs"].items())}
 
     def _close(self, combo: dict, reason: str):
         c = self.executor.close_combo(combo, reason)

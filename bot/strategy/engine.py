@@ -1,6 +1,9 @@
 """Nexus SMC Fractal Engine (Nifty) – line-by-line Python port of the Pine Script v5 indicator.
 
 Section numbers in comments refer to the Pine source (Algo_SMC_Suite_Nifty_v7.4).
+Logic version is chosen by StrategySettings.strategy_version:
+  "v7.4" -> exact v7.4 behaviour (default, unchanged)
+  "v8.0" -> adds the v8.0 changes; every v8-only line is guarded by `self.v8`.
 The order of operations inside on_bar() is the same as the Pine script top-to-bottom order,
 because many variables are read and written in the same bar.
 `None` == Pine `na`. All bars fed to on_bar() are CLOSED bars (barstate.isconfirmed == true).
@@ -75,6 +78,7 @@ def _tf(tf: str, chart_tf: int) -> int:
 class NexusEngine:
     def __init__(self, s: StrategySettings):
         self.s = s
+        self.v8 = str(getattr(s, "strategy_version", "v7.4")) == "v8.0"
         ctf = s.chart_timeframe
         self.chart_tf = ctf
         self.bar_index = -1
@@ -93,7 +97,8 @@ class NexusEngine:
         self.trSum = SumWindow(14)
 
         # --- MTF contexts (one per timeframe)
-        self.htfTf = _tf(s.htfTimeframe, ctf)
+        # v8.0: blank HTF trend timeframe falls back to 60 (safeHtfTimeframe); v7.4: chart TF
+        self.htfTf = _tf(s.htfTimeframe or ("60" if self.v8 else ""), ctf)
         self.chochTf = _tf(s.chochStructureTf, ctf)
         self.idmTfm = _tf(s.idmTf, ctf)
         self.obTfm = _tf(s.obTimeframe, ctf)
@@ -163,6 +168,8 @@ class NexusEngine:
         self.lastSignalBarIndex = -100
         self.activeTradeDir = 0
         self.activeTradeTrigger = ""
+        # v8.0 per-trigger independent lock: name -> [dir, sl, target, startBar]
+        self.trigLock: Dict[str, list] = {k: [0, None, None, -100] for k in ("FVG", "IDM", "OB", "CHoCH")}
         self.lastBuyTriggerSource = ""
         self.lastSellTriggerSource = ""
 
@@ -291,6 +298,8 @@ class NexusEngine:
         # ============================================================ 4. MARKET STRUCTURE
         if isNewPivotHigh:
             pBar = bi - (max(s.htfSwingLength * 2, 5) if self.useHtfStructure else s.swingLength)
+            if self.v8:
+                pBar = max(0, pBar)
             self.pivotHighLevels.insert(0, regPivotHighVal)
             self.pivotHighBars.insert(0, pBar)
             if len(self.pivotHighLevels) > 20:
@@ -311,6 +320,8 @@ class NexusEngine:
 
         if isNewPivotLow:
             pBar = bi - (max(s.htfSwingLength * 2, 5) if self.useHtfStructure else s.swingLength)
+            if self.v8:
+                pBar = max(0, pBar)
             self.pivotLowLevels.insert(0, regPivotLowVal)
             self.pivotLowBars.insert(0, pBar)
             if len(self.pivotLowLevels) > 20:
@@ -348,9 +359,12 @@ class NexusEngine:
             if self.activeTargetHigh is not None and close > self.activeTargetHigh:
                 isBullishBos = True
                 self.lastBullChochBodyBreak = (close > open_) and (close > self.activeTargetHigh)
-                lenSinceHigh = max(bi - self.activeTargetHighBar, 1)
+                if self.v8:
+                    lenSinceHigh = min(max(bi - nz(self.activeTargetHighBar, 0), 1), min(bi, 150))
+                else:
+                    lenSinceHigh = min(max(bi - self.activeTargetHighBar, 1), 500)
                 lowestPullback, lowestBar = low, bi
-                for k in range(0, min(lenSinceHigh, 500) + 1):
+                for k in range(0, lenSinceHigh + 1):
                     lk = self._l(k)
                     if lt(lk, lowestPullback):
                         lowestPullback, lowestBar = lk, bi - k
@@ -363,6 +377,8 @@ class NexusEngine:
                 self.trendBias = -1
                 self.lastBearChochBar = bi
                 self.lastBrokenChochLow = self.protectedStrongLow
+                if self.v8:
+                    self.lastBrokenChochHigh = None
                 self.bearChochRetested = False
                 self.bullChochRetested = True
                 self.chochZoneTouchedBear = False
@@ -371,7 +387,10 @@ class NexusEngine:
                 if self.pivotHighLevels:
                     majorPeakVal, majorPeakBar = self.pivotHighLevels[0], self.pivotHighBars[0]
                 psl_bar = self.protectedStrongLowBar if self.protectedStrongLowBar is not None else bi - 10
-                scanLen = min(max(bi - min(psl_bar, majorPeakBar), 5), 500)
+                if self.v8:
+                    scanLen = min(min(max(bi - min(psl_bar, majorPeakBar), 1), 150), bi)
+                else:
+                    scanLen = min(max(bi - min(psl_bar, majorPeakBar), 5), 500)
                 for k in range(0, scanLen + 1):
                     hk = self._h(k)
                     if gt(hk, majorPeakVal):
@@ -386,9 +405,12 @@ class NexusEngine:
             if self.activeTargetLow is not None and close < self.activeTargetLow:
                 isBearishBos = True
                 self.lastBearChochBodyBreak = (close < open_) and (close < self.activeTargetLow)
-                lenSinceLow = max(bi - self.activeTargetLowBar, 1)
+                if self.v8:
+                    lenSinceLow = min(max(bi - nz(self.activeTargetLowBar, 0), 1), min(bi, 150))
+                else:
+                    lenSinceLow = min(max(bi - self.activeTargetLowBar, 1), 500)
                 highestBounce, highestBar = high, bi
-                for k in range(0, min(lenSinceLow, 500) + 1):
+                for k in range(0, lenSinceLow + 1):
                     hk = self._h(k)
                     if gt(hk, highestBounce):
                         highestBounce, highestBar = hk, bi - k
@@ -401,6 +423,8 @@ class NexusEngine:
                 self.trendBias = 1
                 self.lastBullChochBar = bi
                 self.lastBrokenChochHigh = self.protectedStrongHigh
+                if self.v8:
+                    self.lastBrokenChochLow = None
                 self.bullChochRetested = False
                 self.bearChochRetested = True
                 self.chochZoneTouchedBull = False
@@ -409,7 +433,10 @@ class NexusEngine:
                 if self.pivotLowLevels:
                     majorValleyVal, majorValleyBar = self.pivotLowLevels[0], self.pivotLowBars[0]
                 psh_bar = self.protectedStrongHighBar if self.protectedStrongHighBar is not None else bi - 10
-                scanLen = min(max(bi - min(psh_bar, majorValleyBar), 5), 500)
+                if self.v8:
+                    scanLen = min(min(max(bi - min(psh_bar, majorValleyBar), 1), 150), bi)
+                else:
+                    scanLen = min(max(bi - min(psh_bar, majorValleyBar), 5), 500)
                 for k in range(0, scanLen + 1):
                     lk = self._l(k)
                     if lt(lk, majorValleyVal):
@@ -429,11 +456,15 @@ class NexusEngine:
         # ============================================================ 5. IDM
         if isNewIdmHigh:
             iBar = bi - (5 if self.useHtfIdm else s.idmLookback)
+            if self.v8:
+                iBar = max(0, iBar)
             if isBearishRegime:
                 self.activeIdmHigh = regIdmHighVal
                 self.activeIdmHighBar = iBar
         if isNewIdmLow:
             iBar = bi - (5 if self.useHtfIdm else s.idmLookback)
+            if self.v8:
+                iBar = max(0, iBar)
             if isBullishRegime:
                 self.activeIdmLow = regIdmLowVal
                 self.activeIdmLowBar = iBar
@@ -458,8 +489,12 @@ class NexusEngine:
 
         if isBullishChoch:
             self.lastBearSweepBar = -100
+            if self.v8:  # v8.0 also drops the unswept opposite IDM level
+                self.activeIdmHigh = None
         if isBearishChoch:
             self.lastBullSweepBar = -100
+            if self.v8:
+                self.activeIdmLow = None
         recentBullIdmSweep = (bi - self.lastBullSweepBar) <= 15
         recentBearIdmSweep = (bi - self.lastBearSweepBar) <= 15
 
@@ -574,7 +609,7 @@ class NexusEngine:
         # OB first-touch / mitigation
         touchBullObFirst = touchBearObFirst = False
         matchingBullObIdx = matchingBearObIdx = -1
-        for i in range(len(self.bullObList) - 1, -1, -1):
+        for i in self._zone_order(self.bullObList):
             ob = self.bullObList[i]
             if ob.mitigated:
                 continue
@@ -600,7 +635,7 @@ class NexusEngine:
                         byStyle = close < ob.top
                     if byStyle and bi > ob.birthBar + 1 and ob.touchBar > 0 and (bi - ob.touchBar) >= 3:
                         ob.mitigated = True
-        for i in range(len(self.bearObList) - 1, -1, -1):
+        for i in self._zone_order(self.bearObList):
             ob = self.bearObList[i]
             if ob.mitigated:
                 continue
@@ -630,7 +665,7 @@ class NexusEngine:
         # FVG first-touch / mitigation
         touchBullFvgFirst = touchBearFvgFirst = False
         matchingBullFvgIdx = matchingBearFvgIdx = -1
-        for i in range(len(self.bullFvgList) - 1, -1, -1):
+        for i in self._zone_order(self.bullFvgList):
             f = self.bullFvgList[i]
             if f.mitigated:
                 continue
@@ -647,7 +682,7 @@ class NexusEngine:
                     matchingBullFvgIdx = i
                 if low <= f.bottom or (f.touchBar > 0 and (bi - f.touchBar) >= 3):
                     f.mitigated = True
-        for i in range(len(self.bearFvgList) - 1, -1, -1):
+        for i in self._zone_order(self.bearFvgList):
             f = self.bearFvgList[i]
             if f.mitigated:
                 continue
@@ -815,6 +850,13 @@ class NexusEngine:
                            and candSellTrig != "" and (bi - self.lastSignalBarIndex) >= 15)
         slotAvailable_Buy = (not s.filterDuplicateTrades) or self.activeTradeDir == 0 or canPyramidLong
         slotAvailable_Sell = (not s.filterDuplicateTrades) or self.activeTradeDir == 0 or canPyramidShort
+        if self.v8:
+            # v8.0 per-trigger independent lock: release on SL / target touch or opposite CHoCH ...
+            self._update_trigger_locks(open_, high, low, isBullishChoch, isBearishChoch)
+            # ... and block a trigger whose own slot is still running
+            if s.strictTriggerLock:
+                slotAvailable_Buy = slotAvailable_Buy and self._trigger_free(candBuyTrig)
+                slotAvailable_Sell = slotAvailable_Sell and self._trigger_free(candSellTrig)
 
         candidateBuy = (isBullishRegime and rawTrigger_Buy and allFiltersPass_Buy and not buyLossFreeze
                         and cooldownElapsed and slotAvailable_Buy)
@@ -836,6 +878,8 @@ class NexusEngine:
                     self.bullChochRetested = True
                     self.chochZoneTouchedBull = False
                 self._open(1, candBuyTrig, calcEntry, calcSl, slDist, calcTarget, plannedRr, tstr, events)
+                if self.v8:
+                    self._set_trigger_locks(candBuyTrig, 1, calcSl, calcTarget)
                 if 0 <= matchingBullObIdx < len(self.bullObList):
                     self.bullObList[matchingBullObIdx].tested = True
                     self.bullObList[matchingBullObIdx].mitigated = True
@@ -857,6 +901,8 @@ class NexusEngine:
                     self.bearChochRetested = True
                     self.chochZoneTouchedBear = False
                 self._open(-1, candSellTrig, calcEntry, calcSl, slDist, calcTarget, plannedRr, tstr, events)
+                if self.v8:
+                    self._set_trigger_locks(candSellTrig, -1, calcSl, calcTarget)
                 if 0 <= matchingBearObIdx < len(self.bearObList):
                     self.bearObList[matchingBearObIdx].tested = True
                     self.bearObList[matchingBearObIdx].mitigated = True
@@ -896,6 +942,40 @@ class NexusEngine:
         return events
 
     # ------------------------------------------------------------------ helpers
+    def _zone_order(self, lst: List[Zone]):
+        # v7.4 scans newest -> oldest (oldest touched zone wins); v8.0 scans oldest -> newest (newest wins)
+        return range(len(lst)) if self.v8 else range(len(lst) - 1, -1, -1)
+
+    # --- v8.0 per-trigger independent lock ("Strict Lock Per Trigger")
+    def _update_trigger_locks(self, open_, high, low, isBullishChoch, isBearishChoch):
+        bi = self.bar_index
+        for lk in self.trigLock.values():
+            d, sl, tgt, start = lk
+            if d == 0 or bi <= start:
+                continue
+            if d == 1:
+                done = low <= sl or open_ <= sl or high >= tgt or open_ >= tgt or isBearishChoch
+            else:
+                done = high >= sl or open_ >= sl or low <= tgt or open_ <= tgt or isBullishChoch
+            if done:
+                lk[0] = 0
+
+    def _trigger_free(self, trig: str) -> bool:
+        L = self.trigLock
+        if trig == "CHoCH+IDM":
+            return L["CHoCH"][0] == 0 and L["IDM"][0] == 0
+        if trig in L:
+            return L[trig][0] == 0
+        return True
+
+    def _set_trigger_locks(self, trig: str, d: int, sl: float, tgt: float):
+        for name, lk in self.trigLock.items():
+            if name in trig:  # Pine str.contains: "CHoCH+IDM" locks both CHoCH and IDM
+                lk[:] = [d, sl, tgt, self.bar_index]
+
+    def trigger_locks(self) -> Dict[str, int]:
+        return {k: v[0] for k, v in self.trigLock.items()}
+
     @staticmethod
     def _push_zone(lst: List[Zone], z: Zone, max_n: int):
         lst.append(z)

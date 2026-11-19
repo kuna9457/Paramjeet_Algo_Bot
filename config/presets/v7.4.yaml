@@ -1,0 +1,59 @@
+# Pine defaults of Algo_SMC_Suite_Nifty_v7.4 (strategy block only).
+# Loaded by the dashboard 'Load vX defaults' button; your settings.yaml is only changed when you press it and Save.
+strategy:
+  strategy_version: v7.4
+  strat1_IDM: true
+  idmTf: '15'
+  idmLookback: 3
+  strat6_IDM_Precision: false
+  strat8_HTF_IDM_Trap: false
+  strat2_CHOCH: true
+  chochStructureTf: '60'
+  strat9_Fake_CHOCH: true
+  htfSwingLength: 8
+  swingLength: 15
+  strat3_OB: false
+  obTimeframe: ''
+  obMitigation: Wick Touch
+  maxOrderBlocks: 5
+  strat4_FVG: false
+  fvgTimeframe: ''
+  fvgAtrMultiplier: 0.25
+  maxFvgCount: 5
+  strat5_MTF: true
+  htfTimeframe: '60'
+  strat7_PD_Filter: true
+  strat12_OB_Confirm: true
+  strat13_Psychology1: true
+  strat10_Momentum_CISD: false
+  minDisplacementPct: 40.0
+  strat11_3Condition: false
+  strat16_POI_Confluence: false
+  filterEmaSqueeze: false
+  enableChopFilter: false
+  chopIndexMax: 61.8
+  enableAdxFilter: false
+  adxThreshold: 20.0
+  opposingZoneBufferAtr: 1.5
+  signalCooldownBars: 5
+  filterDuplicateTrades: true
+  strictTriggerLock: true
+  allowMultiTriggerEntries: false
+  slMode: Fixed Points (Preset)
+  slFixedPreset: 80 Points
+  slCustomPoints: 80.0
+  slSwingLookback: 20
+  slBufferPoints: 5.0
+  strat14_Psychology2: true
+  maxAllowedSlPoints: 160.0
+  minTargetRr: 1.5
+  subMinTargetAction: Extend to Min R:R
+  enableMaxTargetCap: false
+  maxTargetRr: 4.0
+  enableBreakEven: true
+  tp1RrMultiple: 1.0
+  strat15_LiquidityRun: false
+  costPerTradePoints: 3.0
+  maxTradeDuration: 150
+  fix_ob_mitigation: false
+  fix_sl_lookback: false

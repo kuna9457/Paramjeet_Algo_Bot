@@ -38,8 +38,14 @@ hedge:
   expiry_mode: nearest_weekly # nearest_weekly | next_weekly | current_monthly | next_monthly | fixed_date
   expiry_date: ""             # YYYY-MM-DD, only used when expiry_mode = fixed_date
   use_next_expiry_on_expiry_day: true   # on expiry day itself, pick the following expiry
-  range_min: 20               # premium difference range (points): BuyLegLTP - SellLegLTP
+  pair_mode: debit            # debit = buy leg costs MORE than sell leg (net debit, range below) | credit = you RECEIVE a net credit
+  range_min: 20               # DEBIT mode: premium difference range (points): BuyLegLTP - SellLegLTP
   range_max: 30
+  credit_min: 10              # CREDIT mode: net credit range (points): SellLegLTP - BuyLegLTP
+  credit_max: 15
+  sell_max_premium: 55        # CREDIT mode: sell leg premium must be <= this (0 = no cap)
+  buy_min_premium: 35         # CREDIT mode: buy leg premium band (0 = no limit on that side)
+  buy_max_premium: 40
   strike_step: 50
   strike_scan_width: 10       # strikes scanned each side of ATM (10 x 50 = +/- 500 pts)
   buy_strike_rule: any        # any | ends_with_00 | ends_with_50
@@ -71,6 +77,12 @@ storage:
 #  STRATEGY  (identical to the Pine Script inputs; defaults = Pine defaults)
 # =====================================================================================
 strategy:
+  # === 0. LOGIC VERSION ===
+  # v7.4 = original logic (unchanged) | v8.0 = adds Strict Per-Trigger Lock, newest-zone retest, IDM reset on CHoCH.
+  # Changing this does NOT change any other setting. To use the v8.0 Pine defaults, press
+  # "Load v8.0 defaults" in the dashboard (or copy config/presets/v8.0.yaml).
+  strategy_version: "v7.4"
+
   # === 1. IDM ENGINE (TREND PULLBACK) ===
   strat1_IDM: true
   idmTf: "15"
@@ -89,13 +101,13 @@ strategy:
   strat3_OB: false
   obTimeframe: ""
   obMitigation: "Wick Touch"  # Wick Touch | 50% Mean Threshold | Full Candle Body  (no effect in Pine, see fix_ob_mitigation)
-  maxOrderBlocks: 5           # 1 - 10
+  maxOrderBlocks: 5           # 1 - 60
 
   # === 4. FAIR VALUE GAP ENGINE ===
   strat4_FVG: false
   fvgTimeframe: ""            # blank = chart TF; else minutes (e.g. 15, 60) - gaps built from that timeframe's candles
   fvgAtrMultiplier: 0.25      # min gap size = this x ATR(14); 0 = accept any gap
-  maxFvgCount: 5              # 1 - 10
+  maxFvgCount: 5              # 1 - 60
 
   # === 5. HTF TREND & QUALITY FILTERS ===
   strat5_MTF: true
@@ -115,6 +127,7 @@ strategy:
   opposingZoneBufferAtr: 1.5
   signalCooldownBars: 5
   filterDuplicateTrades: true
+  strictTriggerLock: true     # v8.0 only: no new FVG/IDM/OB/CHoCH while that same trigger's trade is running (ignored in v7.4)
   allowMultiTriggerEntries: false
 
   # === 6. SWING STOP LOSS & TARGETS (Nifty points) ===

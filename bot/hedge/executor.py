@@ -106,7 +106,8 @@ class ComboExecutor:
             "tp1": signal.get("tp1"), "rr": signal.get("rr"), "expiry": expiry.isoformat(),
             "buy": {"strike": pair.buy.strike, "type": pair.buy.opt_type, "scan_ltp": pair.buy.ltp},
             "sell": {"strike": pair.sell.strike, "type": pair.sell.opt_type, "scan_ltp": pair.sell.ltp},
-            "scan_diff": pair.diff, "ref_price": pair.ref_price, "legs": {},
+            "scan_diff": pair.diff, "pair_mode": pair.mode, "scan_net": round(pair.net, 2),
+            "candidates": pair.candidates, "ref_price": pair.ref_price, "legs": {},
             "opened_at": now_ist().isoformat(),
         }
 
@@ -148,6 +149,9 @@ class ComboExecutor:
             fs.filled -= ex.filled
         leg["buy"].update(qty=fb.filled, entry=fb.avg, orders=fb.order_ids)
         leg["sell"].update(qty=fs.filled, entry=fs.avg, orders=fs.order_ids)
+        if fb.filled > 0 and fb.filled == fs.filled:       # signed: + = net credit received, - = net debit paid
+            leg["net_entry"] = round(fs.avg - fb.avg, 2)
+            leg["net_entry_rs"] = round((fs.avg - fb.avg) * fb.filled, 2)
         if fb.filled > 0 and fb.filled == fs.filled:
             leg["status"] = "OPEN" if fb.filled == qty else "OPEN_PARTIAL"
         else:

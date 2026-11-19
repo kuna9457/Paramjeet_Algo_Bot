@@ -11,10 +11,20 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SETTINGS = ROOT / "config" / "settings.yaml"
+PRESETS_DIR = ROOT / "config" / "presets"
+STRATEGY_VERSIONS = ("v7.4", "v8.0")
+
+
+def load_preset(version: str) -> dict:
+    """Strategy block of config/presets/<version>.yaml (Pine defaults of that version)."""
+    with open(PRESETS_DIR / f"{version}.yaml", "r", encoding="utf-8") as fh:
+        return (yaml.safe_load(fh) or {}).get("strategy", {})
 
 
 @dataclass
 class StrategySettings:
+    # 0. Logic version: "v7.4" (original, default) | "v8.0" (per-trigger lock upgrade)
+    strategy_version: str = "v7.4"
     # 1. IDM
     strat1_IDM: bool = True
     idmTf: str = "15"
@@ -55,6 +65,7 @@ class StrategySettings:
     opposingZoneBufferAtr: float = 1.5
     signalCooldownBars: int = 5
     filterDuplicateTrades: bool = True
+    strictTriggerLock: bool = True  # v8.0 only: no duplicate FVG/IDM/OB/CHoCH till its own target/SL
     allowMultiTriggerEntries: bool = False
     # 6. SL / targets
     slMode: str = "Fixed Points (Preset)"
@@ -114,6 +125,9 @@ def _build_strategy(d: dict, bot: dict) -> StrategySettings:
             raise ValueError(f"Unknown strategy setting: {k}")
         kwargs[k] = v
     s = StrategySettings(**kwargs)
+    s.strategy_version = str(s.strategy_version).strip()
+    if s.strategy_version not in STRATEGY_VERSIONS:
+        raise ValueError(f"strategy_version must be one of {STRATEGY_VERSIONS}, got {s.strategy_version!r}")
     # normalise timeframe strings
     for tf in ("idmTf", "chochStructureTf", "obTimeframe", "fvgTimeframe", "htfTimeframe"):
         v = getattr(s, tf)
@@ -123,12 +137,29 @@ def _build_strategy(d: dict, bot: dict) -> StrategySettings:
     return s
 
 
+def _validate_hedge(h: dict) -> None:
+    mode = str(h.get("pair_mode", "debit") or "debit").strip().lower()
+    if mode not in ("debit", "credit"):
+        raise ValueError(f"hedge.pair_mode must be 'debit' or 'credit', got {h.get('pair_mode')!r}")
+    lo, hi = ((h.get("credit_min", 10), h.get("credit_max", 15)) if mode == "credit"
+              else (h.get("range_min", 20), h.get("range_max", 30)))
+    if float(lo) <= 0 or float(hi) < float(lo):
+        raise ValueError(f"hedge {mode} range must be 0 < min <= max (got {lo}..{hi})")
+    if mode == "credit":
+        bmin, bmax = float(h.get("buy_min_premium", 0) or 0), float(h.get("buy_max_premium", 0) or 0)
+        if bmin and bmax and bmin > bmax:
+            raise ValueError("hedge.buy_min_premium must be <= buy_max_premium")
+        if min(bmin, bmax, float(h.get("sell_max_premium", 0) or 0)) < 0:
+            raise ValueError("hedge premium limits cannot be negative")
+
+
 def load_settings(path: str | Path | None = None) -> Settings:
     load_dotenv(ROOT / ".env")
     p = Path(path) if path else DEFAULT_SETTINGS
     with open(p, "r", encoding="utf-8") as fh:
         raw = yaml.safe_load(fh) or {}
     bot = raw.get("bot", {})
+    _validate_hedge(raw.get("hedge", {}) or {})
     return Settings(
         bot=Section(bot),
         brokers=Section(raw.get("brokers", {})),
