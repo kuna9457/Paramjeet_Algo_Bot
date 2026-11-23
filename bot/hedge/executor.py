@@ -100,7 +100,7 @@ class ComboExecutor:
         return {
             "id": now_ist().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4],
             "status": "OPENING", "direction": d, "side": "BUY" if d == 1 else "SELL",
-            "mode": signal.get("mode", ""),
+            "mode": signal.get("mode", ""), "tid": signal.get("tid"), "tp1_hit": False,
             "trigger": signal.get("trigger"), "signal_time": signal.get("time"),
             "nifty_entry": signal.get("price"), "sl": signal.get("sl"), "target": signal.get("target"),
             "tp1": signal.get("tp1"), "rr": signal.get("rr"), "expiry": expiry.isoformat(),

@@ -35,12 +35,12 @@ brokers:
 # BUY signal  -> BUY CALL (any strike)  + SELL PUT  (strike must end with 50)
 # SELL signal -> BUY PUT  (any strike)  + SELL CALL (strike must end with 50)
 hedge:
-  expiry_mode: nearest_weekly # nearest_weekly | next_weekly | current_monthly | next_monthly | fixed_date
-  expiry_date: ""             # YYYY-MM-DD, only used when expiry_mode = fixed_date
+  expiry_mode: fixed_date # nearest_weekly (default) | next_weekly | current_monthly | next_monthly | fixed_date (pick an exact date in the dashboard)
+  expiry_date: "2026-12-01"             # YYYY-MM-DD, only used when expiry_mode = fixed_date
   use_next_expiry_on_expiry_day: true   # on expiry day itself, pick the following expiry
-  pair_mode: debit            # debit = buy leg costs MORE than sell leg (net debit, range below) | credit = you RECEIVE a net credit
-  range_min: 20               # DEBIT mode: premium difference range (points): BuyLegLTP - SellLegLTP
-  range_max: 30
+  pair_mode: credit            # debit = buy leg costs MORE than sell leg (net debit, range below) | credit = you RECEIVE a net credit
+  range_min: 20               # DEBIT mode: smallest allowed premium difference in points = BuyLegLTP - SellLegLTP (e.g. buy 60, sell 35 -> gap 25)
+  range_max: 30               # DEBIT mode: largest allowed price gap (pairs outside range_min..range_max are ignored)
   credit_min: 10              # CREDIT mode: net credit range (points): SellLegLTP - BuyLegLTP
   credit_max: 15
   sell_max_premium: 55        # CREDIT mode: sell leg premium must be <= this (0 = no cap)

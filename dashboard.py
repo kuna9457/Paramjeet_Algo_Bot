@@ -458,7 +458,7 @@ def page_control():
 
 
 def scan_now(side: str):
-    from bot.hedge.expiry import select_expiry
+    from bot.hedge.expiry import choose_expiry
     from bot.hedge.scanner import find_pair, strike_window
     from bot.live.runner import build_broker
     s = S()
@@ -468,8 +468,10 @@ def scan_now(side: str):
             b = build_broker(s.brokers.data_source, storage())
             b.connect()
             b.load_instruments()
-            exp = select_expiry(b.option_expiries(), H.expiry_mode, now_ist().date(), H.get("expiry_date", ""),
-                                bool(H.get("use_next_expiry_on_expiry_day", True)))
+            exp, note = choose_expiry(b.option_expiries(), H.expiry_mode, now_ist().date(), H.get("expiry_date", ""),
+                                      bool(H.get("use_next_expiry_on_expiry_day", True)))
+            if note:
+                st.warning(note)
             inst = b.signal_instrument(s.bot.signal_symbol)
             ref = b.ltp([inst]).get(inst.key)
             _, strikes = strike_window(ref, int(H.strike_step), int(H.strike_scan_width))
@@ -494,9 +496,173 @@ def _push_settings():
         st.warning(f"Settings saved locally but not backed up to MongoDB: {e}")
 
 
-def _widget(path, value, comments, prefix="set:"):
+EXPIRY_AUTO = {"nearest_weekly": "Nearest upcoming expiry (recommended, auto)",
+               "next_weekly": "The expiry after the nearest (auto)",
+               "current_monthly": "Current monthly expiry (auto)",
+               "next_monthly": "Next monthly expiry (auto)"}
+
+
+def _expiry_widget(flat, prefix="set:"):
+    """One dropdown for expiry: automatic rules, or an exact expiry date taken from the broker's real list."""
+    from bot.hedge.expiry import expiry_options, load_expiry_list
+    mode = str(flat.get(("hedge", "expiry_mode")) or "nearest_weekly")
+    fixed = str(flat.get(("hedge", "expiry_date")) or "")
+    try:
+        opts = expiry_options(load_expiry_list(storage()), now_ist().date())
+    except Exception:  # noqa
+        opts = []
+    labels = dict(EXPIRY_AUTO)
+    labels.update({"fixed:" + o["date"]: "Exact date: " + o["label"] for o in opts})
+    cur = "fixed:" + fixed if mode == "fixed_date" else (mode if mode in EXPIRY_AUTO else "nearest_weekly")
+    if cur not in labels:     # saved date is no longer listed (expired): show it, the bot falls back to the nearest
+        labels[cur] = f"Exact date: {fixed} (not in the broker list - nearest will be used)"
+    keys = list(labels)
+    pick = st.selectbox("Expiry to trade", keys, index=keys.index(cur), format_func=labels.get, key=prefix + "hedge.expiry_pick",
+                        help="Both legs of every trade use this expiry. 'Nearest upcoming' always takes the next real "
+                             "NIFTY expiry from the broker. To choose an exact date press 'Fetch expiries from broker' "
+                             "above (once) - the list then shows every live expiry.")
+    st.session_state["_exp_sel"] = ("fixed_date", pick[6:]) if pick.startswith("fixed:") else (pick, "")
+    return st.session_state["_exp_sel"][0]
+
+
+def _fetch_expiries():
+    """Read the live NIFTY option expiries from the data broker and remember them. Returns the count."""
+    from bot.hedge.expiry import expiry_options, save_expiry_list
+    from bot.live.runner import build_broker
+    s = S()
+    b = build_broker(s.brokers.data_source, storage())
+    b.connect()
+    b.load_instruments()
+    ex = b.option_expiries()
+    save_expiry_list(storage(), s.bot.signal_symbol, ex)
+    return len(expiry_options(ex, now_ist().date()))
+
+
+def expiry_fetch_panel():
+    """Expiry dates come from the broker. Fetched automatically when none are stored yet (once per visit)."""
+    from bot.hedge.expiry import load_expiry_list
+    try:
+        have = [e for e in load_expiry_list(storage()) if e >= now_ist().date()]
+    except Exception:  # noqa
+        have = []
+    if not have and not st.session_state.get("_exp_autofetch"):
+        st.session_state["_exp_autofetch"] = True
+        try:
+            with st.spinner("Fetching expiry dates from your broker ..."):
+                _fetch_expiries()
+            st.rerun()
+        except Exception as e:  # noqa
+            if "Rerun" in type(e).__name__:
+                raise
+            st.caption(f"Could not fetch expiry dates automatically ({e}). Log in to the broker, then press the button.")
+    c1, c2 = st.columns([1, 3])
+    c2.caption(f"Expiry dates stored from broker: {len(have)}" + (f" (next: {min(have)})" if have else "")
+               + " - the bot also refreshes them every day.")
+    if c1.button("🔄 Refresh expiry dates from broker"):
+        try:
+            with st.spinner("Loading instruments from the broker ..."):
+                n = _fetch_expiries()
+            st.success(f"{n} live expiries loaded.")
+            st.rerun()
+        except Exception as e:  # noqa
+            if "Rerun" in type(e).__name__:
+                raise
+            st.error(f"Could not fetch expiries: {e}")
+
+
+def hedge_layout(flat, comments) -> dict:
+    """Option-hedge settings grouped by purpose: pair type, expiry, BUY / SELL premium, ranges, scan, exits."""
+    out, used = {}, set()
+
+    def w(name):
+        p = ("hedge", name)
+        if p not in flat:
+            return None
+        used.add(name)
+        out[p] = _widget(p, flat[p], comments, flat=flat)
+        return out[p]
+
+    st.caption("BUY signal → BUY CALL + SELL PUT · SELL signal → BUY PUT + SELL CALL. The bot picks the strike pair whose "
+               "prices fit the rules below. All of this runs only after a signal; it never changes signal generation.")
+    st.markdown("##### 1 · Pair type")
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        w("pair_mode")
+    c2.info("**debit** – you pay a net debit: *Buy price − Sell price* must be inside the **debit range**.  \n"
+            "**credit** – you receive a net credit: *Sell price − Buy price* must be inside the **credit range**.")
+    st.divider()
+    st.markdown("##### 2 · Expiry")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        w("expiry_mode")
+        w("expiry_date")
+    with c2:
+        w("use_next_expiry_on_expiry_day")
+    with c3:
+        w("expiry_day_exit")
+        w("expiry_exit_time")
+    st.caption("Exact dates come from the broker (use the refresh button above the tabs).")
+    st.divider()
+    st.markdown("##### 3 · Premium of each leg")
+    cb, cs = st.columns(2)
+    with cb:
+        st.markdown("**🟢 BUY leg**")
+        w("buy_strike_rule")
+        w("buy_min_premium")
+        w("buy_max_premium")
+    with cs:
+        st.markdown("**🔴 SELL leg**")
+        w("sell_strike_rule")
+        w("sell_max_premium")
+    st.caption("Premium limits (0 = no limit) apply in **credit** mode. Strike rule: any / ends_with_00 / ends_with_50.")
+    w("min_leg_premium")
+    st.divider()
+    st.markdown("##### 4 · Range (price gap between the two legs, points per unit)")
+    cd, cc = st.columns(2)
+    with cd:
+        st.markdown("**Debit mode** (Buy − Sell)")
+        w("range_min")
+        w("range_max")
+    with cc:
+        st.markdown("**Credit mode** (Sell − Buy)")
+        w("credit_min")
+        w("credit_max")
+    st.divider()
+    st.markdown("##### 5 · Strike scan")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        w("strike_step")
+    with c2:
+        w("strike_scan_width")
+    with c3:
+        w("rescan_interval_sec")
+    with c4:
+        w("max_rescan_sec")
+    st.divider()
+    st.markdown("##### 6 · Combo exits (optional, 0 = off)")
+    c1, c2 = st.columns(2)
+    with c1:
+        w("combo_sl_rs")
+    with c2:
+        w("combo_target_rs")
+    rest = [q[1] for q in flat if q[0] == "hedge" and len(q) == 2 and q[1] not in used]
+    if rest:
+        st.divider()
+        st.markdown("##### Other")
+        cols = st.columns(3)
+        for i, k in enumerate(rest):
+            with cols[i % 3]:
+                w(k)
+    return out
+
+
+def _widget(path, value, comments, prefix="set:", flat=None):
     key = ".".join(path)
     name = path[-1]
+    if key == "hedge.expiry_mode" and flat is not None:
+        return _expiry_widget(flat, prefix)
+    if key == "hedge.expiry_date" and flat is not None:
+        return st.session_state.get("_exp_sel", ("", str(value or "")))[1]
     label = PINE_TITLES.get(name, name.replace("_", " ").capitalize()) if path[0] == "strategy" else \
         name.replace("_", " ").capitalize()
     if path[0] == "brokers" and path[1] == "lots":
@@ -580,6 +746,7 @@ def page_settings():
     if running:
         st.info("The bot is running. Saved changes apply after you restart it (Stop → Start on Bot control).")
     preset_panel(flat)
+    expiry_fetch_panel()
     sections = [k for k in SECTION_TITLES if k in raw]
     new_vals = {}
     with st.form("settings"):
@@ -599,12 +766,12 @@ def page_settings():
                                 new_vals[p] = _widget(p, flat[p], comments)
                 else:
                     if sec == "hedge":
-                        st.caption("BUY signal → BUY CALL + SELL PUT · SELL signal → BUY PUT + SELL CALL · "
-                                   "pair chosen where Buy LTP − Sell LTP is inside the range.")
+                        new_vals.update(hedge_layout(flat, comments))
+                        continue
                     cols = st.columns(3)
                     for i, p in enumerate(paths):
                         with cols[i % 3]:
-                            new_vals[p] = _widget(p, flat[p], comments)
+                            new_vals[p] = _widget(p, flat[p], comments, flat=flat)
         saved = st.form_submit_button("💾 Save settings", type="primary")
     if saved:
         changes = {p: v for p, v in new_vals.items() if v != flat[p] and not (v == "" and flat[p] is None)}
@@ -748,6 +915,28 @@ def page_login():
             n = Notifier(True, env("TELEGRAM_BOT_TOKEN"), env("TELEGRAM_CHAT_ID"))
             n._post(f"✅ Nexus SMC dashboard test message {now_ist():%d-%b %H:%M}")
             st.success("Sent – check Telegram.")
+        st.markdown("**Trade message preview** – sends what a BUY / SELL trade would send "
+                    "(signal, legs, qty, TP1, SL trail, exit). No order is placed.")
+        live_px = st.checkbox("Use real option prices from the broker (needs broker login)", value=False, key="tg_live_px")
+        pc1, pc2, pc3 = st.columns(3)
+        which = "BUY" if pc1.button("Send BUY example", disabled=not tg) else             "SELL" if pc2.button("Send SELL example", disabled=not tg) else             "BOTH" if pc3.button("Send BUY + SELL", disabled=not tg) else ""
+        if which:
+            from bot.live.runner import build_broker
+            from bot.services.preview import simulate_text
+            try:
+                S_ = S()
+                data = None
+                if live_px:
+                    with st.spinner("Connecting to the broker ..."):
+                        data = build_broker(S_.brokers.data_source, storage())
+                        data.connect()
+                        data.load_instruments()
+                n = Notifier(True, env("TELEGRAM_BOT_TOKEN"), env("TELEGRAM_CHAT_ID"))
+                for side in (["BUY", "SELL"] if which == "BOTH" else [which]):
+                    n._post(simulate_text(side, S_, data))
+                st.success("Sent – check Telegram.")
+            except Exception as e:  # noqa
+                st.error(f"Could not build the preview: {e}")
 
     with st.expander("API keys (.env)", expanded=not (ROOT / ".env").exists()):
         if ON_RENDER:

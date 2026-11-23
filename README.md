@@ -32,6 +32,8 @@ python main.py login zerodha
 ```
 You can also paste tokens directly into `.env` (`UPSTOX_ACCESS_TOKEN`, `KITE_ACCESS_TOKEN`).
 
+telegram:: 9226979398:AAGjte_0PpA3mQkDH2dgy3N2NzAisOO3L84
+chat id: 8622437016
 ## 2b. Web dashboard (recommended)
 ```bash
 streamlit run dashboard.py          # or double-click run_dashboard.bat

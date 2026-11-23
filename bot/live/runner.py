@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from collections import deque
 from datetime import datetime, timedelta
@@ -22,8 +23,9 @@ from ..config import ROOT, Settings, env
 from ..data.candle import (bucket_bounds, closed_only, now_ist, resample, session_close_dt,
                            session_open_dt)
 from ..hedge.executor import ComboExecutor
-from ..hedge.expiry import select_expiry
+from ..hedge.expiry import choose_expiry, save_expiry_list
 from ..hedge.scanner import find_pair, pair_mode, range_text, strike_window
+from ..services import messages as M
 from ..services.notifier import Notifier
 from ..services.storage import Storage
 from ..services.tokens import get_token
@@ -33,6 +35,29 @@ log = logging.getLogger("runner")
 KILL_FILE = ROOT / "KILL"
 STOP_FILE = ROOT / "STOP"      # graceful stop (dashboard): leaves positions as they are
 CHART_BARS = 400
+
+
+def trade_id(ev) -> str:
+    """Stable, human-readable id of one punched trade, e.g. B2311-1015-OB (Buy, 23-Nov, signal bar 10:15, trigger OB).
+    Derived from the signal itself, so it is the same in Telegram, the dashboard and every stored record."""
+    m = re.search(r"(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})", str(ev.time))
+    stamp = f"{m.group(3)}{m.group(2)}-{m.group(4)}{m.group(5)}" if m else str(ev.bar_index)
+    trig = re.sub(r"[^A-Za-z+]", "", str(ev.trigger or "")).upper()
+    return f"{'B' if ev.direction == 1 else 'S'}{stamp}" + (f"-{trig}" if trig else "")
+
+
+def combo_status_line(c: dict) -> str:
+    """One Telegram line for a stored combo: id, side, state and whether TP1 was reached."""
+    state = {"OPEN": "OPEN", "CLOSED": "CLOSED", "CLOSE_FAILED": "CLOSE FAILED",
+             "FAILED": "NOT OPENED"}.get(c.get("status"), c.get("status"))
+    pnl = c.get("pnl") or {}
+    if c.get("status") == "CLOSED":
+        tail = f" | exit {c.get('exit_reason')} | P&L Rs{sum(pnl.values()):,.0f}"
+    else:
+        tail = f" | {'TP1 hit' if c.get('tp1_hit') else 'TP1 pending'}"
+        if c.get("sl") is not None and c.get("target") is not None:
+            tail += f" | SL {c['sl']:.2f} | Tgt {c['target']:.2f}"
+    return f"[{c.get('tid') or c.get('id')}] {c.get('side', '')} {state}{tail} | expiry {c.get('expiry', '-')}"
 
 
 def build_broker(name: str, storage: Storage) -> Broker:
@@ -90,6 +115,10 @@ class LiveBot:
             self.exec_brokers = {f"paper-{n}": PaperBroker(self.data, n) for n in names}
         self.executor = ComboExecutor(self.exec_brokers, self.S.brokers, self.storage, self.notify)
         self.signal_inst = self.data.signal_instrument(self.S.bot.signal_symbol)
+        try:   # real exchange expiries, so the dashboard can let the client pick an exact one
+            save_expiry_list(self.storage, self.S.bot.signal_symbol, self.data.option_expiries())
+        except Exception:  # noqa
+            log.exception("could not store expiry list")
         log.info("TICKER: %s (%s) | data source: %s | chart TF %sm", self.S.bot.signal_symbol,
                  self.signal_inst.symbol, ds, self.tf)
         log.info("Signal instrument: %s | execution: %s | mode: %s", self.signal_inst.symbol,
@@ -116,7 +145,8 @@ class LiveBot:
                  ver, st, pos)
         self.notify.send(f"Nexus SMC bot started ({self.mode}) · logic {ver}\nWarm-up {len(bars)} bars, last bar {self.last_bar_time}\n"
                          f"Trend: {'BULL' if self.engine.trendBias == 1 else 'BEAR' if self.engine.trendBias == -1 else '-'}"
-                         f" | Strategy position: {pos['dir']}\nBacktest stats: {st}")
+                         f" | Strategy position: {pos['dir']}\nBacktest stats: {st}"
+                         + self._open_lines("\n\nOpen positions carried over:"))
         self.save_chart()
 
     def sync_positions(self):
@@ -124,7 +154,7 @@ class LiveBot:
         d = self.engine.activeTradeDir
         for c in open_combos:
             if d == 0 or c["direction"] != d:
-                self.notify.send(f"Restart sync: strategy is flat/opposite -> closing combo {c['id']}")
+                self.notify.send(f"Restart sync: strategy is flat/opposite -> closing [{c.get('tid') or c['id']}] combo {c['id']}")
                 self._close(c, "RESTART_SYNC")
         if d != 0 and not self.open_combos() and self.S.safety.get("enter_on_restart", False):
             p = self.engine.position()
@@ -140,6 +170,15 @@ class LiveBot:
         day = now_ist().date().isoformat()
         return [c for c in self.storage.find("combos") if str(c.get("opened_at", "")).startswith(day)]
 
+    def _open_lines(self, head: str) -> str:
+        oc = self.open_combos()
+        return (head + "\n" + "\n".join(combo_status_line(c) for c in oc)) if oc else ""
+
+    def _tids(self) -> str:
+        """Ids of the trades a strategy event (TP1 / SL move / exit) applies to."""
+        ids = [c.get("tid") or c["id"] for c in self.open_combos()]
+        return ", ".join(ids) if ids else (getattr(self, "cur_tid", "") or "-")
+
     def kill_active(self) -> bool:
         return bool(self.S.safety.get("kill_switch")) or KILL_FILE.exists()
 
@@ -153,29 +192,35 @@ class LiveBot:
     # ------------------------------------------------------------------ events
     def handle_events(self, events: List[Event]):
         for ev in events:
-            self.storage.insert("events", {**ev.to_dict(), "mode": self.mode, "logged_at": now_ist().isoformat()})
+            if ev.kind == "ENTRY":
+                self.cur_tid = trade_id(ev)
+            tid = self.cur_tid if ev.kind == "ENTRY" else self._tids()
+            self.storage.insert("events", {**ev.to_dict(), "mode": self.mode, "tid": tid,
+                                           "logged_at": now_ist().isoformat()})
             if ev.kind == "ENTRY":
                 self.handle_entry(ev)
             elif ev.kind == "EXIT":
-                self.notify.send(f"{'🟢' if ev.direction == 1 else '🔴'} Strategy EXIT ({ev.reason}) at Nifty {ev.price:.2f} "
-                                 f"| pts {ev.pnl_points:+.2f}")
+                self.notify.send(M.exit_msg(tid, ev))
                 for c in self.open_combos():
                     self._close(c, ev.reason)
             elif ev.kind == "SL_MOVE":
-                self.notify.send(f"🛡 SL moved to break-even: {ev.sl:.2f}")
+                old_sl = next((c.get("sl") for c in self.open_combos() if c.get("sl") is not None), None)
+                self.notify.send(M.sl_move_msg(tid, old_sl, ev.sl, getattr(self.engine, "entryPrice", None)))
                 for c in self.open_combos():
                     c["sl"] = ev.sl
                     self.storage.upsert("combos", {"id": c["id"]}, {"sl": ev.sl})
             elif ev.kind == "TP1":
-                self.notify.send(f"🎯 TP1 reached at {ev.price:.2f} (SL -> entry from next candle)")
+                self.notify.send(M.tp1_msg(tid, ev, getattr(self.engine, "entryPrice", None), getattr(self.engine, "slPrice", None)))
+                for c in self.open_combos():
+                    self.storage.upsert("combos", {"id": c["id"]}, {"tp1_hit": True, "tp1_at": now_ist().isoformat()})
 
     def handle_entry(self, ev: Event, late: bool = False):
         side = "BUY" if ev.direction == 1 else "SELL"
         icon = "🟢" if ev.direction == 1 else "🔴"
-        msg = (f"{icon} Nexus SMC {side} Signal | Price: {ev.price:.2f} | Trigger: {ev.trigger} | "
-               f"SL: {ev.sl:.2f} | Target: {ev.target:.2f} | R:R {ev.rr:.2f}")
-        self.storage.insert("signals", {**ev.to_dict(), "mode": self.mode})
-        self.notify.send(msg + (" (late entry after restart)" if late else ""))
+        tid = trade_id(ev)
+        self.cur_tid = tid
+        self.storage.insert("signals", {**ev.to_dict(), "mode": self.mode, "tid": tid})
+        self.notify.send(M.signal_msg(tid, ev, str(self.S.strategy.strategy_version), late))
         n = now_ist()
         sf = self.S.safety
         if self.kill_active():
@@ -206,7 +251,7 @@ class LiveBot:
     def _log_action(self, ev: Event, outcome: str, reason: str = "", **extra):
         """What the bot did with a strategy signal: TRADED / SKIPPED / FAILED and why. Never blocks trading."""
         try:
-            doc = {"id": self.sig_id(ev, self.mode), "signal_time": ev.time, "direction": ev.direction,
+            doc = {"id": self.sig_id(ev, self.mode), "tid": trade_id(ev), "signal_time": ev.time, "direction": ev.direction,
                    "trigger": ev.trigger, "mode": self.mode, "outcome": outcome, "reason": reason,
                    "decided_at": now_ist().isoformat(), **extra}
             self.storage.upsert("signal_actions", {"id": doc["id"]}, doc)
@@ -215,14 +260,16 @@ class LiveBot:
 
     def _skip(self, ev: Event, reason: str, msg: str):
         self._log_action(ev, "SKIPPED", reason)
-        self.notify.send(msg)
+        self.notify.send(f"[{trade_id(ev)}] {msg}")
 
     def open_hedge(self, ev: Event) -> dict:
         """Pick the option pair and trade it. Returns the decision for the signal log."""
         H = self.S.hedge
         mode = pair_mode(H)
-        expiry = select_expiry(self.data.option_expiries(), H.expiry_mode, now_ist().date(),
-                               H.get("expiry_date", ""), bool(H.get("use_next_expiry_on_expiry_day", True)))
+        expiry, note = choose_expiry(self.data.option_expiries(), H.expiry_mode, now_ist().date(),
+                                     H.get("expiry_date", ""), bool(H.get("use_next_expiry_on_expiry_day", True)))
+        if note:
+            self.notify.send(f"⚠ {note}")
         if not expiry:
             self.notify.send("❌ No valid expiry found - trade skipped")
             return {"outcome": "SKIPPED", "reason": "No valid expiry found", "pair_mode": mode}
@@ -247,16 +294,10 @@ class LiveBot:
                 "sell": f"{int(m.sell.strike)} {m.sell.opt_type}", "sell_ltp": m.sell.ltp, "net": round(m.net, 2)}
                for m in matches[:5]]
         base.update(candidates=pair.candidates, top_candidates=top)
-        self.notify.send(f"🔎 Pair selected ({pair.candidates} matches), expiry {expiry}:\n{pair.describe()}")
-        combo = self.executor.open_combo(pair, expiry, {**ev.to_dict(), "mode": self.mode})
-        lines = [f"{'✅' if combo['status'] == 'OPEN' else '❌'} Combo {combo['id']} {combo['status']}"]
-        for n, leg in combo["legs"].items():
-            net = leg.get("net_entry")
-            net_txt = "" if net is None else f" | net {'CREDIT' if net >= 0 else 'DEBIT'} {abs(net):.2f}/unit"
-            lines.append(f"{n}: {leg['status']} | BUY {leg['buy'].get('symbol')} x{leg['buy'].get('qty', 0)} @ "
-                         f"{leg['buy'].get('entry', 0)} | SELL {leg['sell'].get('symbol')} x{leg['sell'].get('qty', 0)} @ "
-                         f"{leg['sell'].get('entry', 0)}{net_txt} {leg.get('msg', '')}")
-        self.notify.send("\n".join(lines))
+        tid = trade_id(ev)
+        self.notify.send(M.pair_msg(tid, pair.describe(), expiry, pair.candidates, mode))
+        combo = self.executor.open_combo(pair, expiry, {**ev.to_dict(), "mode": self.mode, "tid": tid})
+        self.notify.send(M.combo_open_msg(tid, combo))
         ok = combo["status"] == "OPEN"
         return {**base, "outcome": "TRADED" if ok else "FAILED", "combo_id": combo["id"],
                 "reason": "" if ok else "; ".join(f"{n}: {l.get('msg', '').strip()}" for n, l in combo["legs"].items())}
@@ -264,10 +305,7 @@ class LiveBot:
     def _close(self, combo: dict, reason: str):
         c = self.executor.close_combo(combo, reason)
         pnl = c.get("pnl", {})
-        self.notify.send(f"{'✅' if c['status'] == 'CLOSED' else '🚨'} Combo {c['id']} {c['status']} ({reason}) "
-                         f"P&L: " + ", ".join(f"{k}: ₹{v:,.0f}" for k, v in pnl.items()))
-        if c["status"] == "CLOSE_FAILED":
-            self.notify.send("🚨 EXIT INCOMPLETE - check broker positions manually NOW")
+        self.notify.send(M.combo_closed_msg(c.get("tid") or c["id"], c, reason))
 
     # ------------------------------------------------------------------ candle processing
     def process_new_bars(self):
@@ -347,10 +385,10 @@ class LiveBot:
                     if d != e.activeTradeDir:
                         continue
                     if (d == 1 and ltp <= e.slPrice) or (d == -1 and ltp >= e.slPrice):
-                        self.notify.send(f"Nifty {ltp:.2f} hit SL {e.slPrice:.2f}")
+                        self.notify.send(f"[{c.get('tid') or c['id']}] Nifty {ltp:.2f} hit SL {e.slPrice:.2f}")
                         self._close(c, "SL_TICK")
                     elif (d == 1 and ltp >= e.effective_target()) or (d == -1 and ltp <= e.effective_target()):
-                        self.notify.send(f"Nifty {ltp:.2f} hit Target {e.effective_target():.2f}")
+                        self.notify.send(f"[{c.get('tid') or c['id']}] Nifty {ltp:.2f} hit Target {e.effective_target():.2f}")
                         self._close(c, "TARGET_TICK")
         # rupee SL / target (optional)
         sl_rs, tg_rs = float(H.get("combo_sl_rs") or 0), float(H.get("combo_target_rs") or 0)
@@ -394,7 +432,9 @@ class LiveBot:
         combos = self.today_combos()
         pnl = sum(sum((c.get("pnl") or {}).values()) for c in combos if c.get("status") == "CLOSED")
         self.notify.send(f"📊 Day summary {now_ist().date()}: combos {len(combos)}, realized P&L ₹{pnl:,.0f}\n"
-                         f"Strategy stats: {self.engine.stats()}\nOpen position: {self.engine.position()}")
+                         f"Strategy stats: {self.engine.stats()}\nOpen position: {self.engine.position()}"
+                         + ("\n\nToday's trades:\n" + "\n".join(combo_status_line(c) for c in combos) if combos else "")
+                         + self._open_lines("\n\nStill open - carried to next session:"))
 
     # ------------------------------------------------------------------ main loop
     def run(self):
