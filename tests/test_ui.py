@@ -3,7 +3,11 @@ import shutil
 import yaml
 
 from backtest.runner import run_backtest
-from bot.config import DEFAULT_SETTINGS, load_settings
+from pathlib import Path
+
+from bot.config import load_settings
+
+DEFAULT_SETTINGS = Path(__file__).parent / "data" / "settings_baseline.yaml"
 from bot.ui import charts, settings_io
 from tests.fakes import synthetic_1m
 
@@ -49,7 +53,7 @@ def test_comments_and_groups_scan():
 
 
 def test_backtest_chart_builds():
-    s = load_settings()
+    s = load_settings(DEFAULT_SETTINGS)
     res = run_backtest(synthetic_1m(30), s.strategy)
     bars = [{"t": c.time.isoformat(), "o": c.open, "h": c.high, "l": c.low, "c": c.close,
              "sh": d.get("protectedStrongHigh"), "sl": d.get("protectedStrongLow"), "eq": d.get("equilibrium")}
@@ -66,7 +70,6 @@ def test_backtest_chart_builds():
 
 def test_add_missing_keys_restores_new_settings_without_touching_saved_values():
     import yaml
-    from bot.config import DEFAULT_SETTINGS
     from bot.ui.settings_io import add_missing_keys
     default = DEFAULT_SETTINGS.read_text(encoding="utf-8")
     import re

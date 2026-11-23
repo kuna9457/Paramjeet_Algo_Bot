@@ -3,7 +3,11 @@ from datetime import datetime, timedelta
 
 import bot.live.runner as runner_mod
 from bot.brokers.paper import PaperBroker
+from pathlib import Path
+
 from bot.config import load_settings
+
+BASELINE = Path(__file__).parent / "data" / "settings_baseline.yaml"
 from bot.data.candle import IST, resample
 from bot.hedge.executor import ComboExecutor
 from bot.live.runner import LiveBot
@@ -14,7 +18,7 @@ from tests.fakes import FakeBroker, synthetic_1m
 
 
 def make_bot(tmp_path):
-    S = load_settings()
+    S = load_settings(BASELINE)
     S.hedge.range_min, S.hedge.range_max = 1, 500
     S.hedge.max_rescan_sec = 0
     S.brokers.leg_fill_timeout_sec = 1

@@ -133,7 +133,8 @@ def test_strict_lock_off_in_v80_changes_nothing_else():
 
 # ------------------------------------------------------------------ old settings.yaml upgrade
 def test_ensure_new_keys_upgrades_old_settings_file(tmp_path: Path):
-    from bot.config import DEFAULT_SETTINGS, load_settings
+    from bot.config import load_settings
+    DEFAULT_SETTINGS = Path(__file__).parent / "data" / "settings_baseline.yaml"
     from bot.ui import settings_io
     old = "".join(ln for ln in DEFAULT_SETTINGS.read_text(encoding="utf-8").splitlines(keepends=True)
                   if "strategy_version:" not in ln and "strictTriggerLock:" not in ln)

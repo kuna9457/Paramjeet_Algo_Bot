@@ -1,4 +1,8 @@
+from pathlib import Path
+
 from bot.config import load_settings
+
+BASELINE = Path(__file__).parent / "data" / "settings_baseline.yaml"
 from bot.services import messages as M
 from bot.services.preview import simulate
 from bot.strategy.engine import Event
@@ -17,7 +21,7 @@ def test_sl_trail_shows_old_and_new():
 
 
 def test_sample_buy_and_sell_flows_show_legs_qty_and_ids():
-    S = load_settings()
+    S = load_settings(BASELINE)
     for side, buy_t, sell_t in (("BUY", "CE", "PE"), ("SELL", "PE", "CE")):
         msgs = simulate(side, S)
         text = "\n".join(msgs)
@@ -30,7 +34,7 @@ def test_sample_buy_and_sell_flows_show_legs_qty_and_ids():
 
 def test_one_message_per_side_is_telegram_sized():
     from bot.services.preview import simulate_text
-    S = load_settings()
+    S = load_settings(BASELINE)
     for side in ("BUY", "SELL"):
         t = simulate_text(side, S)
         assert t.startswith("🧪 TEST") and len(t) < 4000 and t.count("🧪") == 1

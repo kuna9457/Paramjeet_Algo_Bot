@@ -1,6 +1,8 @@
 """Credit pair mode (sell the richer leg, buy the cheaper one, collect a net credit) + per-signal decision log."""
 from datetime import datetime
 
+from pathlib import Path
+
 import pytest
 
 import bot.live.runner as runner_mod
@@ -11,6 +13,8 @@ from bot.hedge.scanner import find_pair, range_text
 from bot.strategy.engine import Event
 from bot.ui import signal_view
 from tests.test_hedge import q
+
+BASELINE = Path(__file__).parent / "data" / "settings_baseline.yaml"
 from tests.test_runner import make_bot
 
 CREDIT = Section({"pair_mode": "credit", "credit_min": 10, "credit_max": 15, "sell_max_premium": 55,
@@ -69,10 +73,10 @@ def test_range_text():
 # ------------------------------------------------------------------ settings validation
 def test_settings_yaml_defaults_to_debit_and_validates(tmp_path):
     from bot.ui import settings_io
-    s = load_settings()
+    s = load_settings(BASELINE)       # tests never read the live config/settings.yaml (the client edits that one)
     assert s.hedge.pair_mode == "debit"
     p = tmp_path / "settings.yaml"
-    p.write_text(open("config/settings.yaml", encoding="utf-8").read(), encoding="utf-8")
+    p.write_text(BASELINE.read_text(encoding="utf-8"), encoding="utf-8")
     with pytest.raises(ValueError):
         settings_io.save({("hedge", "pair_mode"): "sideways"}, p)
     with pytest.raises(ValueError):
@@ -83,7 +87,7 @@ def test_settings_yaml_defaults_to_debit_and_validates(tmp_path):
 
 def test_old_settings_file_gets_hedge_keys(tmp_path):
     from bot.ui import settings_io
-    old = "".join(ln for ln in open("config/settings.yaml", encoding="utf-8").read().splitlines(keepends=True)
+    old = "".join(ln for ln in BASELINE.read_text(encoding="utf-8").splitlines(keepends=True)
                   if not any(k in ln for k in ("pair_mode:", "credit_min:", "credit_max:", "sell_max_premium:",
                                                "buy_min_premium:", "buy_max_premium:")))
     p = tmp_path / "settings.yaml"
