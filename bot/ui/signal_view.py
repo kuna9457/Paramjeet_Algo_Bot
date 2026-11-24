@@ -31,7 +31,7 @@ def _price(scan, fill) -> str:
 def _net_text(net: Optional[float]) -> str:
     if net is None:
         return ""
-    return f"{'CREDIT' if net >= 0 else 'DEBIT'} {abs(net):.2f}"
+    return f"{'received' if net >= 0 else 'paid'} {abs(net):.2f}"
 
 
 def find_combo(ev: dict, combos: List[dict], action: Optional[dict]) -> Optional[dict]:
@@ -79,7 +79,7 @@ def signal_rows(events: List[dict], combos: List[dict], actions: List[dict]) -> 
                 "SELL leg": f"SELL {int(s['strike'])} {s['type']}" if s.get("strike") else "",
                 "SELL premium (scan → fill)": _price(s.get("scan_ltp"), ls.get("entry")),
                 "net premium": _net_text(net if net is not None else combo.get("scan_net")),
-                "pair mode": combo.get("pair_mode", "debit"), "qty": lb.get("qty") or ls.get("qty"),
+                "qty": lb.get("qty") or ls.get("qty"),
                 "combo status": combo.get("status"), "exit reason": combo.get("exit_reason", ""),
                 "closed": str(combo.get("closed_at") or "")[:19].replace("T", " "),
                 "P&L ₹": combo_total(combo), "combo id": combo.get("id"),
@@ -122,7 +122,7 @@ def timeline(combo: dict, ev: dict, action: Optional[dict]) -> List[str]:
         lines.append(f"{action.get('outcome', '')}: {action['reason']}")
     if combo:
         lines.append(f"Combo {combo.get('id')} opened {str(combo.get('opened_at', ''))[:19]} · "
-                     f"{combo.get('pair_mode', 'debit')} pair · status {combo.get('status')}")
+                     f"status {combo.get('status')}")
         if combo.get("exit_reason"):
             lines.append(f"Closed {str(combo.get('closed_at', ''))[:19]} · reason {combo['exit_reason']} · "
                          f"P&L ₹{combo_total(combo)}")

@@ -16,13 +16,13 @@ def test_settings_roundtrip_keeps_comments(tmp_path):
     p = tmp_path / "settings.yaml"
     shutil.copyfile(DEFAULT_SETTINGS, p)
     before = p.read_text(encoding="utf-8")
-    upd = {("hedge", "range_min"): 25, ("hedge", "range_max"): 40, ("brokers", "lots", "zerodha"): 3,
+    upd = {("hedge", "hedge_diff_min"): 8, ("hedge", "hedge_diff_max"): 12, ("brokers", "lots", "zerodha"): 3,
            ("brokers", "enabled"): ["upstox"], ("strategy", "slMode"): "Custom Points",
            ("strategy", "obTimeframe"): "15", ("strategy", "strat3_OB"): True, ("hedge", "expiry_exit_time"): "15:10"}
     settings_io.save(upd, p)
     after = p.read_text(encoding="utf-8")
     raw = yaml.safe_load(after)
-    assert raw["hedge"]["range_min"] == 25 and raw["hedge"]["range_max"] == 40
+    assert raw["hedge"]["hedge_diff_min"] == 8 and raw["hedge"]["hedge_diff_max"] == 12
     assert raw["brokers"]["lots"] == {"upstox": 1, "zerodha": 3}
     assert raw["brokers"]["enabled"] == ["upstox"]
     assert raw["strategy"]["slMode"] == "Custom Points" and raw["strategy"]["obTimeframe"] == "15"
@@ -48,7 +48,7 @@ def test_settings_invalid_is_rolled_back(tmp_path):
 def test_comments_and_groups_scan():
     _, text = settings_io.read_raw()
     comments, groups = settings_io.scan(text)
-    assert "premium difference" in comments[("hedge", "range_min")]
+    assert "sell premium - hedge" in comments[("hedge", "hedge_diff_min")].lower()
     assert groups[("strategy", "strat1_IDM")].startswith("1. IDM")
 
 

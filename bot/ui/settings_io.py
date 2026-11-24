@@ -147,24 +147,39 @@ NEW_KEYS = {
         "  strictTriggerLock: true      # v8.0 only: no new FVG/IDM/OB/CHoCH while that same trigger's trade is running",
     ),
     "hedge": (
-        "  pair_mode: debit            # debit = net debit (range_min/max) | credit = you RECEIVE a net credit",
-        "  credit_min: 10              # CREDIT mode: net credit range (points): SellLegLTP - BuyLegLTP",
-        "  credit_max: 15",
-        "  sell_max_premium: 55        # CREDIT mode: sell leg premium <= this (0 = no cap)",
-        "  buy_min_premium: 35         # CREDIT mode: buy leg premium band (0 = no limit on that side)",
-        "  buy_max_premium: 40",
+        "  sell_min_premium: 0         # SELL leg premium band (0 = no limit). The bot sells the richest option inside it",
+        "  sell_max_premium: 55        # e.g. 55 -> sells the put/call whose premium is closest to 55 without going over",
+        "  hedge_diff_min: 10          # Sell premium - hedge (buy) premium must be inside this range (0 = no limit)",
+        "  hedge_diff_max: 15          # e.g. sell 52, range 10-15 -> hedge premium 37-42, strike beyond the sold one",
     ),
 }
 NEW_STRATEGY_KEYS = NEW_KEYS["strategy"]   # kept for backwards compatibility
+# Hedge keys of the old debit/credit pair modes - no longer used, removed from older settings files.
+LEGACY_KEYS = {"hedge": ("pair_mode", "range_min", "range_max", "credit_min", "credit_max",
+                         "buy_min_premium", "buy_max_premium")}
 NL = chr(10)
 
 
+def drop_legacy_keys(text: str) -> str:
+    """Remove LEGACY_KEYS lines from a settings.yaml text (one-line scalar keys only, which is all they are)."""
+    out, sect = [], None
+    for ln in text.splitlines(keepends=True):
+        m = LINE.match(ln.rstrip("\r\n"))
+        if m and not ln.lstrip().startswith("#"):
+            if not m.group("ind"):
+                sect = m.group("key")
+            elif m.group("key") in LEGACY_KEYS.get(sect, ()):
+                continue
+        out.append(ln)
+    return "".join(out)
+
+
 def ensure_new_keys(path: Path = DEFAULT_SETTINGS) -> bool:
-    """Insert NEW_KEYS missing from an older settings.yaml. Saved values are never changed."""
+    """Insert NEW_KEYS missing from an older settings.yaml and drop LEGACY_KEYS. Saved values are never changed."""
     path = Path(path)
     text = path.read_text(encoding="utf-8")
     default = "".join(f"{sec}:" + NL + NL.join(lines) + NL for sec, lines in NEW_KEYS.items())
-    merged = add_missing_keys(text, default)
+    merged = drop_legacy_keys(add_missing_keys(text, default))
     if merged == text:
         return False
     path.write_text(merged, encoding="utf-8")

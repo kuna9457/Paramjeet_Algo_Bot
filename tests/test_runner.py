@@ -19,7 +19,7 @@ from tests.fakes import FakeBroker, synthetic_1m
 
 def make_bot(tmp_path):
     S = load_settings(BASELINE)
-    S.hedge.range_min, S.hedge.range_max = 1, 500
+    S.hedge.hedge_diff_min, S.hedge.hedge_diff_max = 0, 0        # any hedge below/above; sell leg keeps <= 55
     S.hedge.max_rescan_sec = 0
     S.brokers.leg_fill_timeout_sec = 1
     fake = FakeBroker()
@@ -44,8 +44,9 @@ def test_signal_to_combo_to_tick_sl_exit(tmp_path, monkeypatch):
     combos = bot.open_combos()
     assert len(combos) == 1
     c = combos[0]
-    assert c["side"] == "BUY" and c["buy"]["type"] == "CE" and c["sell"]["type"] == "PE"
-    assert int(c["sell"]["strike"]) % 100 == 50
+    assert c["side"] == "BUY" and c["buy"]["type"] == "PE" and c["sell"]["type"] == "PE"
+    assert int(c["sell"]["strike"]) % 100 == 50 and int(c["buy"]["strike"]) % 100 == 50
+    assert c["buy"]["strike"] < c["sell"]["strike"] and c["sell"]["scan_ltp"] <= 55
     assert c["expiry"] == "2026-11-10"
     assert set(c["legs"]) == {"paper-upstox", "paper-zerodha"}
 
@@ -66,7 +67,8 @@ def test_expiry_day_eod_exit(tmp_path, monkeypatch):
     bot.S.hedge.expiry_date = "2026-11-10"
     bot.S.hedge.use_next_expiry_on_expiry_day = False
     bot.handle_events([Event("ENTRY", 1, "t", -1, "CHoCH", 23480.0, 23560.0, 23320.0, 23400.0, 2.0)])
-    assert bot.open_combos()[0]["side"] == "SELL"
+    c = bot.open_combos()[0]
+    assert c["side"] == "SELL" and c["sell"]["type"] == c["buy"]["type"] == "CE" and c["buy"]["strike"] > c["sell"]["strike"]
     monkeypatch.setattr(runner_mod, "now_ist", lambda: datetime(2026, 11, 10, 15, 16, tzinfo=IST))
     bot.engine.activeTradeDir = 0
     bot.monitor()

@@ -129,7 +129,7 @@ def cmd_backtest(S, args):
 def cmd_scan(S, args):
     from bot.data.candle import now_ist
     from bot.hedge.expiry import select_expiry
-    from bot.hedge.scanner import find_pair, strike_window
+    from bot.hedge.scanner import find_pair, range_text, strike_window
     from bot.live.runner import build_broker
     st = storage_from(S)
     b = build_broker(S.brokers.data_source, st)
@@ -144,7 +144,7 @@ def cmd_scan(S, args):
     chain = b.option_chain(exp, strikes)
     d = 1 if args.side.upper() == "BUY" else -1
     best, matches = find_pair(d, chain, ref, H)
-    print(f"Reference {S.bot.signal_symbol}: {ref} | expiry {exp} | range {H.range_min}-{H.range_max} | quotes {len(chain)}")
+    print(f"Reference {S.bot.signal_symbol}: {ref} | expiry {exp} | {range_text(H)} | quotes {len(chain)}")
     if not best:
         print("No pair in range right now.")
     for i, p in enumerate(matches[:10]):

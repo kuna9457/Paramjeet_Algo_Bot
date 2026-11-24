@@ -106,7 +106,7 @@ class ComboExecutor:
             "tp1": signal.get("tp1"), "rr": signal.get("rr"), "expiry": expiry.isoformat(),
             "buy": {"strike": pair.buy.strike, "type": pair.buy.opt_type, "scan_ltp": pair.buy.ltp},
             "sell": {"strike": pair.sell.strike, "type": pair.sell.opt_type, "scan_ltp": pair.sell.ltp},
-            "scan_diff": pair.diff, "pair_mode": pair.mode, "scan_net": round(pair.net, 2),
+            "scan_diff": pair.diff, "scan_net": pair.net,
             "candidates": pair.candidates, "ref_price": pair.ref_price, "legs": {},
             "opened_at": now_ist().isoformat(),
         }

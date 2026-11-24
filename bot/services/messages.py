@@ -46,8 +46,8 @@ def signal_msg(tid: str, ev, logic: str = "", late: bool = False) -> str:
     return "\n".join(lines)
 
 
-def pair_msg(tid: str, describe: str, expiry, candidates: int, mode: str) -> str:
-    return (f"🔎 [{tid}] Option pair chosen ({mode} mode, {candidates} matches), expiry {expiry}\n{describe}")
+def pair_msg(tid: str, describe: str, expiry, candidates: int) -> str:
+    return (f"🔎 [{tid}] Option pair chosen ({candidates} matches), expiry {expiry}\n{describe}")
 
 
 def leg_lines(name: str, leg: dict) -> list:
@@ -57,7 +57,7 @@ def leg_lines(name: str, leg: dict) -> list:
     out.append(f"  SELL {s.get('symbol', '-')}  qty {s.get('qty', 0)}  @ {_f(s.get('entry'))}")
     net, net_rs = leg.get("net_entry"), leg.get("net_entry_rs")
     if net is not None:
-        out.append(f"  Net {'CREDIT' if net >= 0 else 'DEBIT'} {abs(net):.2f}/unit = Rs {abs(net_rs or 0):,.0f} total")
+        out.append(f"  Net premium {'received' if net >= 0 else 'paid'} {abs(net):.2f}/unit = Rs {abs(net_rs or 0):,.0f} total")
     if leg.get("msg"):
         out.append(f"  note: {leg['msg'].strip()}")
     return out
@@ -66,7 +66,7 @@ def leg_lines(name: str, leg: dict) -> list:
 def combo_open_msg(tid: str, combo: dict) -> str:
     ok = combo.get("status") == "OPEN"
     lines = [f"{'✅ ORDERS PLACED' if ok else '❌ ORDERS FAILED'}  [{tid}]  {combo.get('side', '')} signal",
-             f"Combo {combo.get('id')} | expiry {combo.get('expiry')} | pair mode {combo.get('pair_mode', 'debit')}"]
+             f"Combo {combo.get('id')} | expiry {combo.get('expiry')}"]
     for name, leg in (combo.get("legs") or {}).items():
         lines += leg_lines(name, leg)
     lines.append(f"Nifty entry {_f(combo.get('nifty_entry'))} | SL {_f(combo.get('sl'))} | TP1 {_f(combo.get('tp1'))} | "

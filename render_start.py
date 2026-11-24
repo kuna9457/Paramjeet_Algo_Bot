@@ -30,10 +30,11 @@ def pull_settings() -> None:
         if not doc or not doc.get("text"):
             print("[render_start] no saved settings in MongoDB - using the defaults from the repo", flush=True)
             return
-        from bot.ui.settings_io import add_missing_keys
+        from bot.ui.settings_io import add_missing_keys, drop_legacy_keys
         tmp = DEFAULT_SETTINGS.with_name("settings.pulled.yaml")
         # saved copy may predate new settings (e.g. fvgTimeframe) - add them from the repo defaults
-        tmp.write_text(add_missing_keys(doc["text"], DEFAULT_SETTINGS.read_text(encoding="utf-8")), encoding="utf-8")
+        tmp.write_text(drop_legacy_keys(add_missing_keys(doc["text"], DEFAULT_SETTINGS.read_text(encoding="utf-8"))),
+                       encoding="utf-8")
         load_settings(tmp)                       # validate before using
         tmp.replace(DEFAULT_SETTINGS)
         print("[render_start] settings restored from MongoDB", flush=True)

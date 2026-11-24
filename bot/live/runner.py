@@ -24,7 +24,7 @@ from ..data.candle import (bucket_bounds, closed_only, now_ist, resample, sessio
                            session_open_dt)
 from ..hedge.executor import ComboExecutor
 from ..hedge.expiry import choose_expiry, save_expiry_list
-from ..hedge.scanner import find_pair, pair_mode, range_text, strike_window
+from ..hedge.scanner import find_pair, range_text, strike_window
 from ..services import messages as M
 from ..services.notifier import Notifier
 from ..services.storage import Storage
@@ -265,14 +265,13 @@ class LiveBot:
     def open_hedge(self, ev: Event) -> dict:
         """Pick the option pair and trade it. Returns the decision for the signal log."""
         H = self.S.hedge
-        mode = pair_mode(H)
         expiry, note = choose_expiry(self.data.option_expiries(), H.expiry_mode, now_ist().date(),
                                      H.get("expiry_date", ""), bool(H.get("use_next_expiry_on_expiry_day", True)))
         if note:
             self.notify.send(f"⚠ {note}")
         if not expiry:
             self.notify.send("❌ No valid expiry found - trade skipped")
-            return {"outcome": "SKIPPED", "reason": "No valid expiry found", "pair_mode": mode}
+            return {"outcome": "SKIPPED", "reason": "No valid expiry found"}
         deadline = time.time() + float(H.get("max_rescan_sec", 60))
         pair, matches, scans, ref = None, [], 0, ev.price
         while True:
@@ -285,7 +284,7 @@ class LiveBot:
                 break
             log.info("No pair (%s) yet, rescanning", range_text(H))
             time.sleep(float(H.get("rescan_interval_sec", 5)))
-        base = {"pair_mode": mode, "expiry": expiry.isoformat(), "scan_ref_price": ref, "scan_rounds": scans,
+        base = {"expiry": expiry.isoformat(), "scan_ref_price": ref, "scan_rounds": scans,
                 "wanted": range_text(H)}
         if not pair:
             self.notify.send(f"⚠ No option pair ({range_text(H)}) found for {expiry} after {scans} scans - trade skipped")
@@ -295,7 +294,7 @@ class LiveBot:
                for m in matches[:5]]
         base.update(candidates=pair.candidates, top_candidates=top)
         tid = trade_id(ev)
-        self.notify.send(M.pair_msg(tid, pair.describe(), expiry, pair.candidates, mode))
+        self.notify.send(M.pair_msg(tid, pair.describe(), expiry, pair.candidates))
         combo = self.executor.open_combo(pair, expiry, {**ev.to_dict(), "mode": self.mode, "tid": tid})
         self.notify.send(M.combo_open_msg(tid, combo))
         ok = combo["status"] == "OPEN"

@@ -79,7 +79,6 @@ CHOICES = {
     "hedge.sell_strike_rule": ["ends_with_50", "ends_with_00", "any"],
     "storage.backend": ["mongo", "local"],
     "strategy.strategy_version": list(STRATEGY_VERSIONS),
-    "hedge.pair_mode": ["debit", "credit"],
     "strategy.idmTf": TF_OPTS, "strategy.chochStructureTf": TF_OPTS, "strategy.obTimeframe": TF_OPTS, "strategy.fvgTimeframe": TF_OPTS,
     "strategy.htfTimeframe": TF_OPTS,
     "strategy.obMitigation": ["Wick Touch", "50% Mean Threshold", "Full Candle Body"],
@@ -221,7 +220,7 @@ def trades_today_panel(today_c: list, events: list, actions: list | None = None)
 
 
 def signals_panel(events: list, combos: list, actions: list, key: str) -> None:
-    """Every strategy signal with what the bot did: option legs, premiums, net credit/debit, exit and P&L."""
+    """Every strategy signal with what the bot did: option legs, premiums, net premium, exit and P&L."""
     if not events:
         st.info("No strategy signals yet.")
         return
@@ -236,8 +235,7 @@ def signals_panel(events: list, combos: list, actions: list, key: str) -> None:
         df = pd.DataFrame(rows)
         st.dataframe(df, hide_index=True, width="stretch")
         st.caption("TRADED = option combo placed · SKIPPED = signal not traded (reason shown) · FAILED = order legs did not "
-                   "fill. Premium columns show scan price → actual fill price. Net premium: CREDIT = you received, "
-                   "DEBIT = you paid.")
+                   "fill. Premium columns show scan price → actual fill price. Net premium = sell premium − buy premium.")
         by_ev = {signal_view.action_id(e): e for e in events if e.get("kind") == "ENTRY"}
         act_by = {a.get("id"): a for a in actions}
         pick = st.selectbox("Signal details", ["—"] + [f"{r['time']} · {r['signal']} · {r['trigger']}" for r in rows],
@@ -459,7 +457,7 @@ def page_control():
 
 def scan_now(side: str):
     from bot.hedge.expiry import choose_expiry
-    from bot.hedge.scanner import find_pair, strike_window
+    from bot.hedge.scanner import find_pair, range_text, strike_window
     from bot.live.runner import build_broker
     s = S()
     H = s.hedge
@@ -477,7 +475,7 @@ def scan_now(side: str):
             _, strikes = strike_window(ref, int(H.strike_step), int(H.strike_scan_width))
             chain = b.option_chain(exp, strikes)
             best, matches = find_pair(1 if side == "BUY" else -1, chain, ref, H)
-        st.write(f"Reference {ref} · expiry {exp} · range {H.range_min}-{H.range_max} · {len(chain)} quotes")
+        st.write(f"Reference {ref} · expiry {exp} · {range_text(H)} · {len(chain)} quotes")
         if not matches:
             st.warning("No pair in range right now.")
         for i, p in enumerate(matches[:10]):
@@ -582,16 +580,10 @@ def hedge_layout(flat, comments) -> dict:
         out[p] = _widget(p, flat[p], comments, flat=flat)
         return out[p]
 
-    st.caption("BUY signal → BUY CALL + SELL PUT · SELL signal → BUY PUT + SELL CALL. The bot picks the strike pair whose "
-               "prices fit the rules below. All of this runs only after a signal; it never changes signal generation.")
-    st.markdown("##### 1 · Pair type")
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        w("pair_mode")
-    c2.info("**debit** – you pay a net debit: *Buy price − Sell price* must be inside the **debit range**.  \n"
-            "**credit** – you receive a net credit: *Sell price − Buy price* must be inside the **credit range**.")
-    st.divider()
-    st.markdown("##### 2 · Expiry")
+    st.caption("BUY signal → SELL PUT + BUY a lower-strike PUT (hedge) · SELL signal → SELL CALL + BUY a higher-strike "
+               "CALL (hedge). An order is placed only when both legs fit the premium ranges below. All of this runs only "
+               "after a signal; it never changes signal generation.")
+    st.markdown("##### 1 · Expiry")
     c1, c2, c3 = st.columns(3)
     with c1:
         w("expiry_mode")
@@ -603,32 +595,26 @@ def hedge_layout(flat, comments) -> dict:
         w("expiry_exit_time")
     st.caption("Exact dates come from the broker (use the refresh button above the tabs).")
     st.divider()
-    st.markdown("##### 3 · Premium of each leg")
-    cb, cs = st.columns(2)
-    with cb:
-        st.markdown("**🟢 BUY leg**")
-        w("buy_strike_rule")
-        w("buy_min_premium")
-        w("buy_max_premium")
+    st.markdown("##### 2 · Sell premium and hedge range")
+    cs, cb = st.columns(2)
     with cs:
-        st.markdown("**🔴 SELL leg**")
+        st.markdown("**🔴 SELL leg** (PUT on BUY signal · CALL on SELL signal)")
         w("sell_strike_rule")
+        w("sell_min_premium")
         w("sell_max_premium")
-    st.caption("Premium limits (0 = no limit) apply in **credit** mode. Strike rule: any / ends_with_00 / ends_with_50.")
+    with cb:
+        st.markdown("**🟢 BUY leg – hedge** (strike beyond the sold strike)")
+        w("buy_strike_rule")
+        st.markdown("Range: **Sell premium − Buy premium**")
+        w("hedge_diff_min")
+        w("hedge_diff_max")
+    st.caption("0 = no limit on that side. The bot sells the option with the highest premium inside the sell range "
+               "(e.g. closest to 55), then buys the nearest hedge strike beyond it where Sell − Buy premium is inside "
+               "the range (e.g. sell 52, range 10-15 → hedge premium 37-42). "
+               "Strike rule: any / ends_with_00 / ends_with_50.")
     w("min_leg_premium")
     st.divider()
-    st.markdown("##### 4 · Range (price gap between the two legs, points per unit)")
-    cd, cc = st.columns(2)
-    with cd:
-        st.markdown("**Debit mode** (Buy − Sell)")
-        w("range_min")
-        w("range_max")
-    with cc:
-        st.markdown("**Credit mode** (Sell − Buy)")
-        w("credit_min")
-        w("credit_max")
-    st.divider()
-    st.markdown("##### 5 · Strike scan")
+    st.markdown("##### 3 · Strike scan")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         w("strike_step")
@@ -639,7 +625,7 @@ def hedge_layout(flat, comments) -> dict:
     with c4:
         w("max_rescan_sec")
     st.divider()
-    st.markdown("##### 6 · Combo exits (optional, 0 = off)")
+    st.markdown("##### 4 · Combo exits (optional, 0 = off)")
     c1, c2 = st.columns(2)
     with c1:
         w("combo_sl_rs")
@@ -1133,7 +1119,7 @@ def page_backtest():
         st.markdown(f"Strategy: logic **{s.strategy.strategy_version}** · all **Pine inputs** from Settings · chart timeframe **{s.strategy.chart_timeframe}m** · "
                     f"lots **{lots}** ({', '.join(f'{b}: {lot_map.get(b, 1)}' for b in enabled) or 'none enabled'}) × "
                     f"lot size {lot_size}")
-        st.caption("₹ ≈ Nifty points × lots × lot size (BUY CALL + SELL PUT moves about 1:1 with Nifty). Option "
+        st.caption("₹ ≈ Nifty points × lots × lot size (a rough guide only: the option spread gains/loses less than 1:1 with Nifty). Option "
                    "premiums, strike/expiry selection, slippage and charges are not simulated: there is no historical "
                    "option-chain data.")
         with st.expander("Full strategy settings in use"):

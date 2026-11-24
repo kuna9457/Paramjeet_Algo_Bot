@@ -8,35 +8,59 @@ from bot.hedge.scanner import find_pair, strike_window
 from bot.services.storage import LocalStorage
 from tests.fakes import FakeBroker
 
-CFG = Section({"range_min": 20, "range_max": 30, "strike_step": 50, "strike_scan_width": 10,
-               "buy_strike_rule": "any", "sell_strike_rule": "ends_with_50", "min_leg_premium": 5})
+CFG = Section({"sell_min_premium": 0, "sell_max_premium": 55, "hedge_diff_min": 10, "hedge_diff_max": 15,
+               "strike_step": 50, "strike_scan_width": 10, "buy_strike_rule": "ends_with_50",
+               "sell_strike_rule": "ends_with_50", "min_leg_premium": 5})
 
 
 def q(k, t, p):
     return OptionQuote(float(k), t, p, Instrument(f"{k}{t}", f"{k}{t}", None, float(k), t))
 
 
-def test_client_example_buy_signal():
-    chain = [q(23500, "CE", 130), q(23350, "PE", 100), q(23450, "PE", 128), q(23400, "CE", 175),
-             q(23600, "CE", 85), q(23250, "PE", 62)]
+def test_client_example_buy_signal_sells_put_le_55_and_hedge_gap_in_range():
+    chain = [q(23450, "PE", 98), q(23350, "PE", 70), q(23250, "PE", 54), q(23200, "PE", 46), q(23150, "PE", 39),
+             q(23050, "PE", 28), q(23600, "CE", 40)]
     best, matches = find_pair(1, chain, 23480, CFG)
-    assert {(p.buy.strike, p.sell.strike) for p in matches} == {(23500, 23350), (23600, 23250)}
-    assert (best.buy.strike, best.buy.opt_type, best.sell.strike, best.sell.opt_type) == (23500, "CE", 23350, "PE")
-    assert best.diff == 30
+    assert (best.sell.strike, best.sell.opt_type, best.buy.strike, best.buy.opt_type) == (23250, "PE", 23150, "PE")
+    assert best.net == 15                                   # 54 - 39 = 15, inside 10-15
+    assert {(m.sell.strike, m.buy.strike) for m in matches} == {(23250, 23150), (23150, 23050)}   # 39 - 28 = 11
 
 
-def test_sell_leg_never_on_00_strike_and_diff_positive():
-    chain = [q(23500, "CE", 130), q(23400, "PE", 105), q(23300, "PE", 70)]   # only 00 puts
-    best, _ = find_pair(1, chain, 23480, CFG)
-    assert best is None
-    chain = [q(23500, "CE", 100), q(23550, "PE", 125)]                      # negative diff (credit)
-    assert find_pair(1, chain, 23480, CFG)[0] is None
+def test_sell_leg_premium_cap_and_strike_rule():
+    hedge = q(23050, "PE", 42)
+    assert find_pair(1, [q(23250, "PE", 55), hedge], 23480, CFG)[0] is not None      # 55 allowed, gap 13
+    assert find_pair(1, [q(23250, "PE", 56), hedge], 23480, CFG)[0] is None          # above the 55 cap
+    assert find_pair(1, [q(23300, "PE", 52), hedge], 23480, CFG)[0] is None          # 00 strike never sold
+    assert find_pair(1, [q(23250, "PE", 52), q(23050, "CE", 40)], 23480, CFG)[0] is None   # hedge must be a PUT
+
+
+def test_sell_picks_richest_premium_then_hedge_by_gap():
+    chain = [q(23350, "PE", 54), q(23250, "PE", 45), q(23150, "PE", 41), q(23050, "PE", 36)]
+    best, matches = find_pair(1, chain, 23480, CFG)
+    assert (best.sell.strike, best.buy.strike) == (23350, 23150)      # 23250 gap 9, 23150 gap 13, 23050 gap 18
+    assert len(matches) == 1
+
+
+def test_hedge_must_be_beyond_the_sold_strike_and_gap_inside_range():
+    sell = q(23250, "PE", 50)
+    assert find_pair(1, [sell, q(23350, "PE", 38)], 23480, CFG)[0] is None     # hedge above the sold put
+    assert find_pair(1, [sell, q(23150, "PE", 41)], 23480, CFG)[0] is None     # gap 9 < 10
+    assert find_pair(1, [sell, q(23150, "PE", 34)], 23480, CFG)[0] is None     # gap 16 > 15
+    assert find_pair(1, [sell, q(23150, "PE", 40)], 23480, CFG)[0] is not None  # gap 10 (edge included)
+    assert find_pair(1, [sell, q(23150, "PE", 35)], 23480, CFG)[0] is not None  # gap 15 (edge included)
 
 
 def test_sell_signal_mapping():
-    chain = [q(23450, "PE", 110), q(23650, "CE", 85), q(23550, "CE", 140)]
+    chain = [q(23450, "PE", 110), q(23650, "CE", 85), q(23750, "CE", 53), q(23850, "CE", 40), q(23550, "CE", 140)]
     best, _ = find_pair(-1, chain, 23480, CFG)
-    assert best.buy.opt_type == "PE" and best.sell.opt_type == "CE" and best.sell.strike == 23650
+    assert (best.sell.strike, best.sell.opt_type, best.buy.strike, best.buy.opt_type) == (23750, "CE", 23850, "CE")
+
+
+def test_sell_min_premium_and_zero_means_no_limit():
+    chain = [q(23250, "PE", 30), q(23150, "PE", 20)]
+    open_cfg = Section({**CFG.__dict__, "sell_max_premium": 0, "hedge_diff_min": 0, "hedge_diff_max": 0})
+    assert find_pair(1, chain, 23480, open_cfg)[0] is not None
+    assert find_pair(1, chain, 23480, Section({**open_cfg.__dict__, "sell_min_premium": 31}))[0] is None
 
 
 def test_strike_window():
@@ -63,8 +87,8 @@ def test_executor_open_and_close_on_two_brokers(tmp_path):
     ex = ComboExecutor({"upstox": up, "zerodha": ze}, bcfg, LocalStorage(tmp_path), None)
     _, strikes = strike_window(up.spot, 50, 10)
     chain = up.option_chain(date(2026, 11, 17), strikes)
-    pair, _ = find_pair(1, chain, up.spot, Section({**CFG.__dict__, "range_min": 0.5, "range_max": 500}))
-    assert pair and int(pair.sell.strike) % 100 == 50
+    pair, _ = find_pair(1, chain, up.spot, Section({**CFG.__dict__, "hedge_diff_min": 0, "hedge_diff_max": 0}))
+    assert pair and int(pair.sell.strike) % 100 == 50 and pair.buy.strike < pair.sell.strike
     combo = ex.open_combo(pair, date(2026, 11, 17), {"trigger": "IDM", "price": 23480, "sl": 23400, "target": 23640})
     assert combo["status"] == "OPEN"
     assert combo["legs"]["upstox"]["buy"]["qty"] == 150 and combo["legs"]["zerodha"]["sell"]["qty"] == 75

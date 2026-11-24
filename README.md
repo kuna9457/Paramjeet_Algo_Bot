@@ -4,10 +4,10 @@ Python port of the TradingView indicator `Algo_SMC_Suite_Nifty_v7.4`. It trades 
 
 | Strategy signal (5m Nifty candle close) | Combo placed |
 |---|---|
-| **BUY**  | BUY CALL (any strike) + SELL PUT (strike ending in **50**) |
-| **SELL** | BUY PUT (any strike) + SELL CALL (strike ending in **50**) |
+| **BUY**  | SELL PUT (premium <= **55**, strike ending in **50**) + BUY a **lower-strike** PUT as hedge |
+| **SELL** | SELL CALL (premium <= **55**, strike ending in **50**) + BUY a **higher-strike** CALL as hedge |
 
-The pair is chosen so that **Buy-leg LTP − Sell-leg LTP** is positive and inside your range (default **20–30**). If several pairs qualify, the one whose sell strike is **closest** to Nifty is used. Exits follow the strategy's SL / TP1 break-even / target / opposite CHoCH / max-bars rules on the Nifty chart, plus an EOD exit on the contract's expiry day. Both legs are always closed together, with the short leg bought back first.
+In Settings → Options hedge you set the sell premium range (`sell_min_premium`/`sell_max_premium`, 0 = no limit) and the hedge range `hedge_diff_min`/`hedge_diff_max` = **Sell premium − Buy premium** (e.g. 10–15). The bot sells the option with the highest premium inside the sell range (closest to 55), then buys the nearest 50-ending strike beyond it where Sell − Buy is inside the range (sell 52, range 10–15 → hedge premium 37–42). If no pair fits, the trade is skipped and you get an alert. Exits follow the strategy's SL / TP1 break-even / target / opposite CHoCH / max-bars rules on the Nifty chart, plus an EOD exit on the contract's expiry day. Both legs are always closed together, with the short leg bought back first.
 
 ---
 

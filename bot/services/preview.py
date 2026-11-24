@@ -5,12 +5,13 @@ so the test shows which legs would really be punched right now. Without one it u
 """
 from __future__ import annotations
 
+import math
 from datetime import date
 from typing import List, Optional
 
 from ..brokers.base import Instrument, OptionQuote
 from ..hedge.expiry import choose_expiry
-from ..hedge.scanner import find_pair, pair_mode, strike_window
+from ..hedge.scanner import find_pair, range_text, strike_window
 from ..strategy.engine import Event
 from . import messages as M
 
@@ -23,8 +24,9 @@ def _sample_chain(ref: float, expiry: date, lot: int) -> List[OptionQuote]:
     atm = round(ref / 50) * 50
     for i in range(-10, 11):
         k = float(atm + i * 50)
-        ce = 120.0 - 0.42 * (k - atm)       # calls get cheaper as the strike goes up
-        pe = 120.0 + 0.42 * (k - atm)       # puts get dearer as the strike goes up
+        tv = 140.0 * math.exp(-abs(k - atm) / 350)   # time value fades away from ATM
+        ce = max(atm - k, 0) + tv
+        pe = max(k - atm, 0) + tv
         for t, px in (("CE", ce), ("PE", pe)):
             out.append(OptionQuote(k, t, round(max(px, 5.0), 2),
                                    Instrument(f"SAMPLE:{int(k)}{t}", f"NIFTY{expiry:%d%b%y}{int(k)}{t}".upper(), expiry, k, t, lot)))
@@ -59,12 +61,11 @@ def simulate(side: str, S, data=None, notify_prefix: str = "🧪 TEST - no order
                px - d * sl_pts, px + d * sl_pts * 1.5, px + d * sl_pts, 1.5)
     tid = _tid(ev)
     out = [M.signal_msg(tid, ev, str(S.strategy.strategy_version))]
-    mode = pair_mode(H)
     if not pair:
-        out.append(f"⚠ [{tid}] No option pair found for the current rules ({mode} mode) - the real bot would SKIP this "
+        out.append(f"⚠ [{tid}] No option pair found for the current rules ({range_text(H)}) - the real bot would SKIP this "
                    f"trade and tell you why. Nothing more to show.")
         return [notify_prefix + ("(sample numbers) " if sample else "") + m for m in out]
-    out.append(M.pair_msg(tid, pair.describe(), expiry, pair.candidates, mode))
+    out.append(M.pair_msg(tid, pair.describe(), expiry, pair.candidates))
     legs = {}
     brokers = list(S.brokers.enabled or ["paper"])
     for name in brokers:
@@ -79,7 +80,7 @@ def simulate(side: str, S, data=None, notify_prefix: str = "🧪 TEST - no order
                      "entry": pair.sell.ltp},
             "net_entry": round(pair.sell.ltp - pair.buy.ltp, 2),
             "net_entry_rs": round((pair.sell.ltp - pair.buy.ltp) * qty, 2)}
-    combo = {"id": "TEST-" + tid, "status": "OPEN", "side": side.upper(), "expiry": expiry.isoformat(), "pair_mode": mode,
+    combo = {"id": "TEST-" + tid, "status": "OPEN", "side": side.upper(), "expiry": expiry.isoformat(),
              "nifty_entry": ev.price, "sl": ev.sl, "tp1": ev.tp1, "target": ev.target, "legs": legs}
     out.append(M.combo_open_msg(tid, combo))
     out.append(M.tp1_msg(tid, Event("TP1", 2, "", d, price=ev.tp1), ev.price, ev.sl))
@@ -87,10 +88,10 @@ def simulate(side: str, S, data=None, notify_prefix: str = "🧪 TEST - no order
     out.append(M.exit_msg(tid, Event("EXIT", 5, "", d, price=ev.target, reason="TARGET",
                                      pnl_points=abs(ev.target - ev.price))))
     pnl = {}
-    for name, leg in legs.items():       # illustrative exit: buy leg gains 20 pts, sell leg decays 12 pts
+    for name, leg in legs.items():       # illustrative exit at target: sold option decays 20 pts, hedge decays 10 pts
         leg["status"] = "CLOSED"
-        leg["buy"]["exit"] = round(leg["buy"]["entry"] + 20, 2)
-        leg["sell"]["exit"] = round(max(leg["sell"]["entry"] - 12, 0.05), 2)
+        leg["buy"]["exit"] = round(max(leg["buy"]["entry"] - 10, 0.05), 2)
+        leg["sell"]["exit"] = round(max(leg["sell"]["entry"] - 20, 0.05), 2)
         pnl[name] = round((leg["buy"]["exit"] - leg["buy"]["entry"]) * leg["buy"]["qty"]
                           + (leg["sell"]["entry"] - leg["sell"]["exit"]) * leg["sell"]["qty"], 2)
     combo.update(status="CLOSED", pnl=pnl)

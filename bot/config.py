@@ -138,19 +138,16 @@ def _build_strategy(d: dict, bot: dict) -> StrategySettings:
 
 
 def _validate_hedge(h: dict) -> None:
-    mode = str(h.get("pair_mode", "debit") or "debit").strip().lower()
-    if mode not in ("debit", "credit"):
-        raise ValueError(f"hedge.pair_mode must be 'debit' or 'credit', got {h.get('pair_mode')!r}")
-    lo, hi = ((h.get("credit_min", 10), h.get("credit_max", 15)) if mode == "credit"
-              else (h.get("range_min", 20), h.get("range_max", 30)))
-    if float(lo) <= 0 or float(hi) < float(lo):
-        raise ValueError(f"hedge {mode} range must be 0 < min <= max (got {lo}..{hi})")
-    if mode == "credit":
-        bmin, bmax = float(h.get("buy_min_premium", 0) or 0), float(h.get("buy_max_premium", 0) or 0)
-        if bmin and bmax and bmin > bmax:
-            raise ValueError("hedge.buy_min_premium must be <= buy_max_premium")
-        if min(bmin, bmax, float(h.get("sell_max_premium", 0) or 0)) < 0:
-            raise ValueError("hedge premium limits cannot be negative")
+    for lo_key, hi_key in (("sell_min_premium", "sell_max_premium"), ("hedge_diff_min", "hedge_diff_max")):
+        lo, hi = float(h.get(lo_key, 0) or 0), float(h.get(hi_key, 0) or 0)
+        if lo < 0 or hi < 0:
+            raise ValueError(f"hedge.{lo_key} / {hi_key} cannot be negative")
+        if lo and hi and lo > hi:
+            raise ValueError(f"hedge.{lo_key} must be <= {hi_key} (got {lo:g}..{hi:g})")
+    for key in ("buy_strike_rule", "sell_strike_rule"):
+        rule = h.get(key, "ends_with_50")
+        if rule not in ("any", "ends_with_00", "ends_with_50"):
+            raise ValueError(f"hedge.{key} must be any / ends_with_00 / ends_with_50, got {rule!r}")
 
 
 def load_settings(path: str | Path | None = None) -> Settings:

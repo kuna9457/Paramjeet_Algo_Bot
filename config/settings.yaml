@@ -32,24 +32,25 @@ brokers:
   freeze_qty: 1755            # NSE freeze quantity for NIFTY options (orders are sliced above this; Upstox master value used if smaller)
 
 # ------------------------------------------------------------------ 3. OPTIONS HEDGE
-# BUY signal  -> BUY CALL (any strike)  + SELL PUT  (strike must end with 50)
-# SELL signal -> BUY PUT  (any strike)  + SELL CALL (strike must end with 50)
+# BUY signal  -> SELL PUT  (premium in the sell band, e.g. <= 55) + BUY PUT  at a LOWER strike  (hedge)
+# SELL signal -> SELL CALL (premium in the sell band)            + BUY CALL at a HIGHER strike (hedge)
 hedge:
+  pair_mode: debit            # debit = net debit (range_min/max) | credit = you RECEIVE a net credit
+  credit_min: 10              # CREDIT mode: net credit range (points): SellLegLTP - BuyLegLTP
+  credit_max: 15
   expiry_mode: fixed_date # nearest_weekly (default) | next_weekly | current_monthly | next_monthly | fixed_date (pick an exact date in the dashboard)
   expiry_date: "2026-12-01"             # YYYY-MM-DD, only used when expiry_mode = fixed_date
   use_next_expiry_on_expiry_day: true   # on expiry day itself, pick the following expiry
-  pair_mode: credit            # debit = buy leg costs MORE than sell leg (net debit, range below) | credit = you RECEIVE a net credit
-  range_min: 20               # DEBIT mode: smallest allowed premium difference in points = BuyLegLTP - SellLegLTP (e.g. buy 60, sell 35 -> gap 25)
-  range_max: 30               # DEBIT mode: largest allowed price gap (pairs outside range_min..range_max are ignored)
-  credit_min: 10              # CREDIT mode: net credit range (points): SellLegLTP - BuyLegLTP
-  credit_max: 15
-  sell_max_premium: 55        # CREDIT mode: sell leg premium must be <= this (0 = no cap)
+  sell_min_premium: 0         # SELL leg premium band (0 = no limit). The bot sells the richest option inside it
+  sell_max_premium: 55        # e.g. 55 -> sells the put/call whose premium is closest to 55 without going over
   buy_min_premium: 35         # CREDIT mode: buy leg premium band (0 = no limit on that side)
   buy_max_premium: 40
+  hedge_diff_min: 10          # Sell premium - hedge (buy) premium must be inside this range (0 = no limit)
+  hedge_diff_max: 15          # e.g. sell 52, range 10-15 -> hedge premium 37-42, strike beyond the sold one
   strike_step: 50
-  strike_scan_width: 10       # strikes scanned each side of ATM (10 x 50 = +/- 500 pts)
-  buy_strike_rule: any        # any | ends_with_00 | ends_with_50
-  sell_strike_rule: ends_with_50
+  strike_scan_width: 20       # strikes scanned each side of ATM (20 x 50 = +/- 1000 pts; cheap hedges sit far OTM)
+  buy_strike_rule: ends_with_50 # any | ends_with_00 | ends_with_50 (hedge leg)
+  sell_strike_rule: ends_with_50 # any | ends_with_00 | ends_with_50 (sold leg)
   min_leg_premium: 5.0        # ignore options cheaper than this
   rescan_interval_sec: 5
   max_rescan_sec: 60          # no pair in range for this long -> skip trade + alert
