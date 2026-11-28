@@ -35,10 +35,20 @@ brokers:
 # BUY signal  -> SELL PUT  (premium in the sell band, e.g. <= 55) + BUY PUT  at a LOWER strike  (hedge)
 # SELL signal -> SELL CALL (premium in the sell band)            + BUY CALL at a HIGHER strike (hedge)
 hedge:
-  expiry_mode: nearest_weekly # nearest_weekly | next_weekly | current_monthly | next_monthly | fixed_date
+  expiry_mode: min_days # min_days (first expiry with >= min_days_to_expiry days left) | nearest_weekly | next_weekly | current_monthly | next_monthly | fixed_date
   expiry_date: ""             # YYYY-MM-DD, only used when expiry_mode = fixed_date
   use_next_expiry_on_expiry_day: true   # on expiry day itself, pick the following expiry
-  sell_min_premium: 0         # SELL leg premium band (0 = no limit). The bot sells the richest option inside it
+  min_days_to_expiry: 7       # expiry_mode = min_days: first weekly/monthly expiry with at least this many days left (>= 2)
+  max_days_to_expiry: 0       # expiry_mode = min_days: and at most this many (0 = no limit)
+  strike_mode: atm_offset      # atm_offset = sell ATM / up to sell_otm_points OTM + hedge hedge_otm_points OTM | premium_band = sell <= premium + hedge by premium gap
+  sell_otm_points: 50         # atm_offset: sold leg = ATM or up to this many points OTM (0 = ATM only)
+  hedge_otm_points: 200       # atm_offset: hedge leg strike = ATM -/+ this (PUT below / CALL above) -> width 150-200
+  atm_sell_strike_rule: ends_with_00 # atm_offset: sold strike must end with any | ends_with_00 | ends_with_50
+  atm_buy_strike_rule: ends_with_50  # atm_offset: hedge strike must end with any | ends_with_00 | ends_with_50 (nearest to the hedge distance)
+  atm_sell_min_premium: 0     # atm_offset: sold leg premium must be >= this (0 = no limit)
+  atm_sell_max_premium: 0     # atm_offset: sold leg premium must be <= this (0 = no limit)
+  max_bid_ask_spread: 0.30    # both legs: skip an option whose bid-ask spread is wider than this in Rs (0 = off)
+  sell_min_premium: 0         # premium_band: SELL leg premium band (0 = no limit). The bot sells the richest option inside it
   sell_max_premium: 55        # e.g. 55 -> sells the put/call whose premium is closest to 55 without going over
   hedge_diff_min: 10          # Sell premium - hedge (buy) premium must be inside this range (0 = no limit)
   hedge_diff_max: 15          # e.g. sell 52, range 10-15 -> hedge premium 37-42, strike beyond the sold one
@@ -76,8 +86,9 @@ strategy:
   # === 0. LOGIC VERSION ===
   # v7.4 = original logic (unchanged) | v8.0 = adds Strict Per-Trigger Lock, newest-zone retest, IDM reset on CHoCH.
   # v8.7 = v8.0 + HTML-backtest sync: +70 pts / 12-bar quant wins, 70-pt fallback target, no loss-freeze, OB>FVG>CHoCH>IDM priority.
-  # Changing this does NOT change any other setting. To use the v8.0 Pine defaults, press
-  # "Load v8.0 / v8.7 defaults" in the dashboard (or copy config/presets/<version>.yaml).
+  # v9.2 = v8.7 + ATR 3.0x SL (65-140), exits at 1.25R or 8 bars with close >= +0.5R, break-even at 0.55R, 2-loss 2 h hold.
+  # Changing this does NOT change any other setting. To use a version's Pine defaults, press
+  # "Load vX defaults" in the dashboard (or copy config/presets/<version>.yaml).
   strategy_version: "v8.7"
 
   # === 1. IDM ENGINE (TREND PULLBACK) ===
@@ -128,7 +139,7 @@ strategy:
   allowMultiTriggerEntries: false
 
   # === 6. SWING STOP LOSS & TARGETS (Nifty points) ===
-  slMode: "Fixed Points (Preset)"   # Fixed Points (Preset) | Swing High/Low | Custom Points
+  slMode: "Fixed Points (Preset)"   # Fixed Points (Preset) | Swing High/Low | Custom Points | ATR Adaptive (3.0x) (v9.2 only)
   slFixedPreset: "70 Points"        # 70 Points | 80 Points | 90 Points
   slCustomPoints: 80.0
   slSwingLookback: 20         # Swing High/Low SL lookback (bars): used only when fix_sl_lookback is true (Pine ignores it)
@@ -144,6 +155,9 @@ strategy:
   strat15_LiquidityRun: true
   costPerTradePoints: 3.0
   maxTradeDuration: 500
+  enableTimeExit: true        # v9.2 only: close after maxTradeDuration bars (Pine v9.2 default false = pure swing)
+  enableLossHold: false       # v9.2 only: pause new entries after 2 consecutive losses (Pine v9.2 default true)
+  holdDurationHours: 2        # v9.2 only: pause length in hours (1 - 6)
 
   # === Pine quirk fixes (false = behave exactly like TradingView) ===
   fix_ob_mitigation: false

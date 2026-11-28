@@ -183,7 +183,8 @@ class UpstoxBroker(Broker):
                 ltp = float(md.get("ltp") or 0)
                 inst = self.option_instrument(expiry, k, t) or Instrument(o.get("instrument_key", ""), "", expiry, k, t)
                 if ltp > 0 and inst.key:
-                    res.append(OptionQuote(k, t, ltp, inst))
+                    res.append(OptionQuote(k, t, ltp, inst, float(md.get("bid_price") or 0),
+                                           float(md.get("ask_price") or 0)))
         return res
 
     # ------------------------------------------------------------------ orders

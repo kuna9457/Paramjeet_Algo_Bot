@@ -52,6 +52,23 @@ def combo_total(combo: dict) -> Optional[float]:
     return round(sum(v or 0 for v in pnl.values()), 2) if pnl else None
 
 
+OPEN_STATUSES = ("OPEN", "CLOSE_FAILED", "OPENING")
+
+
+def active_between(combo: dict, start: str, end: str) -> bool:
+    """True if the trade was live on any day from start to end (ISO dates): opened, closed or carried overnight."""
+    opened = str(combo.get("opened_at") or "")[:10]
+    if not opened or opened > end:
+        return False
+    if combo.get("status") in OPEN_STATUSES:
+        return True
+    return str(combo.get("closed_at") or opened)[:10] >= start
+
+
+def closed_on(combo: dict, day: str) -> bool:
+    return combo.get("status") == "CLOSED" and str(combo.get("closed_at") or "").startswith(day)
+
+
 def signal_rows(events: List[dict], combos: List[dict], actions: List[dict]) -> List[dict]:
     """One row per ENTRY signal, newest first, with the option trade that followed (if any)."""
     by_id = {a.get("id"): a for a in actions}

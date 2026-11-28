@@ -143,14 +143,27 @@ def add_missing_keys(saved_text: str, default_text: str) -> str:
 # inserted with values that reproduce the previous behaviour exactly (v7.4 logic, debit pairs).
 NEW_KEYS = {
     "strategy": (
-        '  strategy_version: "v7.4"     # v7.4 = original logic | v8.0 = Strict Per-Trigger Lock | v8.7 = HTML-backtest sync',
+        '  strategy_version: "v7.4"     # v7.4 = original logic | v8.0 = Strict Per-Trigger Lock | v8.7 = HTML-backtest sync | v9.2 = Trial v9.2',
         "  strictTriggerLock: true      # v8.0 only: no new FVG/IDM/OB/CHoCH while that same trigger's trade is running",
+        "  enableTimeExit: true        # v9.2 only: close after maxTradeDuration bars (Pine v9.2 default false = pure swing)",
+        "  enableLossHold: false       # v9.2 only: pause new entries after 2 consecutive losses (Pine v9.2 default true)",
+        "  holdDurationHours: 2        # v9.2 only: pause length in hours (1 - 6)",
     ),
     "hedge": (
         "  sell_min_premium: 0         # SELL leg premium band (0 = no limit). The bot sells the richest option inside it",
         "  sell_max_premium: 55        # e.g. 55 -> sells the put/call whose premium is closest to 55 without going over",
         "  hedge_diff_min: 10          # Sell premium - hedge (buy) premium must be inside this range (0 = no limit)",
         "  hedge_diff_max: 15          # e.g. sell 52, range 10-15 -> hedge premium 37-42, strike beyond the sold one",
+        "  min_days_to_expiry: 7       # expiry_mode = min_days: first weekly/monthly expiry with at least this many days left (>= 2)",
+        "  max_days_to_expiry: 0       # expiry_mode = min_days: and at most this many (0 = no limit)",
+        "  strike_mode: atm_offset      # atm_offset = sell ATM / up to sell_otm_points OTM + hedge hedge_otm_points OTM | premium_band = sell <= premium + hedge by premium gap",
+        "  sell_otm_points: 50         # atm_offset: sold leg = ATM or up to this many points OTM (0 = ATM only)",
+        "  hedge_otm_points: 200       # atm_offset: hedge leg strike = ATM -/+ this (PUT below / CALL above) -> width 150-200",
+        "  atm_sell_strike_rule: ends_with_00 # atm_offset: sold strike must end with any | ends_with_00 | ends_with_50",
+        "  atm_buy_strike_rule: ends_with_50  # atm_offset: hedge strike must end with any | ends_with_00 | ends_with_50 (nearest to the hedge distance)",
+        "  atm_sell_min_premium: 0     # atm_offset: sold leg premium must be >= this (0 = no limit)",
+        "  atm_sell_max_premium: 0     # atm_offset: sold leg premium must be <= this (0 = no limit)",
+        "  max_bid_ask_spread: 0.30    # both legs: skip an option whose bid-ask spread is wider than this in Rs (0 = off)",
     ),
 }
 NEW_STRATEGY_KEYS = NEW_KEYS["strategy"]   # kept for backwards compatibility

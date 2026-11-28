@@ -20,6 +20,7 @@ from tests.fakes import FakeBroker, synthetic_1m
 def make_bot(tmp_path):
     S = load_settings(BASELINE)
     S.hedge.hedge_diff_min, S.hedge.hedge_diff_max = 0, 0        # any hedge below/above; sell leg keeps <= 55
+    S.hedge.strike_mode, S.hedge.expiry_mode = "premium_band", "nearest_weekly"   # premium-rule tests; ATM rule: test_sheet_rules
     S.hedge.max_rescan_sec = 0
     S.brokers.leg_fill_timeout_sec = 1
     fake = FakeBroker()

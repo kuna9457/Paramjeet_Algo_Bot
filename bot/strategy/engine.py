@@ -7,6 +7,12 @@ Logic version is chosen by StrategySettings.strategy_version:
   "v8.7" -> everything in v8.0 plus the v8.7 changes (guarded by `self.v87`): FVG mitigation timing, CHoCH-only
             fake-breakout filter, trigger priority OB>FVG>CHoCH+IDM>CHoCH>IDM, no loss-freeze, 70-pt fallback target,
             POI consumed only by its own trigger, and the +70 pts / 12-bar liquidity-decay quant exits.
+  "v9.2" -> everything in v8.7 plus the Trial v9.2 changes (guarded by `self.v92`): ATR Adaptive (3.0x) SL, exits =
+            target OR 8 bars held with close >= +0.5R (the +70 pts exit and +70 pts TP1 are gone), optional time exit,
+            2-consecutive-loss trading hold, running-pullback BOS levels, 50-bar CHoCH extremes, 25-bar CHoCH/BOS
+            order blocks, max 5 live OB/FVG zones per list with mitigated zones cleared, OB mitigation style active,
+            no HTF IDM, 10 stored pivots. Its `inActiveWindow` / drawing-window guards are TradingView speed limits only
+            (the bot always processes every bar).
 The order of operations inside on_bar() is the same as the Pine script top-to-bottom order,
 because many variables are read and written in the same bar.
 `None` == Pine `na`. All bars fed to on_bar() are CLOSED bars (barstate.isconfirmed == true).
@@ -15,6 +21,7 @@ Drawing-only code (boxes, lines, labels, dashboard table) is omitted.
 from __future__ import annotations
 
 import math
+from datetime import timedelta
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional
 
@@ -48,7 +55,7 @@ class Event:
     target: Optional[float] = None
     tp1: Optional[float] = None
     rr: Optional[float] = None
-    reason: str = ""          # EXIT: CHOCH | SL | BE | TARGET | TIME
+    reason: str = ""          # EXIT: CHOCH | SL | BE | TARGET | TIME | QUANT_70 / DECAY_12 (v8.7) | DECAY_8 (v9.2)
     pnl_points: Optional[float] = None
 
     def to_dict(self):
@@ -103,8 +110,9 @@ class NexusEngine:
     def __init__(self, s: StrategySettings):
         self.s = s
         ver = str(getattr(s, "strategy_version", "v7.4"))
-        self.v87 = ver == "v8.7"
-        self.v8 = ver in ("v8.0", "v8.7")          # v8.7 contains every v8.0 change
+        self.v92 = ver == "v9.2"
+        self.v87 = ver in ("v8.7", "v9.2")         # v9.2 contains every v8.7 change
+        self.v8 = ver in ("v8.0", "v8.7", "v9.2")  # v8.7 contains every v8.0 change
         ctf = s.chart_timeframe
         self.chart_tf = ctf
         self.bar_index = -1
@@ -129,7 +137,7 @@ class NexusEngine:
         self.idmTfm = _tf(s.idmTf, ctf)
         self.obTfm = _tf(s.obTimeframe, ctf)
         self.useHtfStructure = s.chochStructureTf != "" and self.chochTf != ctf and ctf <= self.chochTf
-        self.useHtfIdm = s.idmTf != "" and self.idmTfm != ctf and ctf <= self.idmTfm
+        self.useHtfIdm = s.idmTf != "" and self.idmTfm != ctf and ctf <= self.idmTfm and not self.v92  # v9.2: chart IDM only
         self.useHtfOb = s.obTimeframe != "" and self.obTfm != ctf and ctf <= self.obTfm
         self.fvgTfm = _tf(s.fvgTimeframe, ctf)
         self.useHtfFvg = s.fvgTimeframe != "" and self.fvgTfm != ctf and ctf <= self.fvgTfm
@@ -171,6 +179,15 @@ class NexusEngine:
         self.chochZoneTouchedBear = False
         self.lastBullChochBodyBreak = False
         self.lastBearChochBodyBreak = False
+        # v9.2 running extremes (reset on each new pivot) and 25-bar OB anchors (Pine fixnan series)
+        self.runningPullbackLow = None
+        self.runningPullbackLowBar = None
+        self.runningBounceHigh = None
+        self.runningBounceHighBar = None
+        self.bullObTop25 = None
+        self.bearObBtm25 = None
+        self.pivotCap = 10 if self.v92 else 20
+        self.zoneCap = (lambda n: min(n, 5)) if self.v92 else (lambda n: n)
 
         # --- 5. IDM
         self.activeIdmHigh = None
@@ -208,6 +225,9 @@ class NexusEngine:
         self.tp1Price = None
         self.tp1Hit = False
         self.tp1HitBarIndex = -100
+        # v9.2 circuit breaker: 2 consecutive losses -> no new entries for holdDurationHours
+        self.consecutiveLosses = 0
+        self.holdUntil = None          # datetime (bar time) until which new entries are paused
 
         # --- stats (dashboard)
         self.winTradesCount = 0
@@ -328,7 +348,7 @@ class NexusEngine:
                 pBar = max(0, pBar)
             self.pivotHighLevels.insert(0, regPivotHighVal)
             self.pivotHighBars.insert(0, pBar)
-            if len(self.pivotHighLevels) > 20:
+            if len(self.pivotHighLevels) > self.pivotCap:
                 self.pivotHighLevels.pop()
                 self.pivotHighBars.pop()
             if self.trendBias == 1:
@@ -350,7 +370,7 @@ class NexusEngine:
                 pBar = max(0, pBar)
             self.pivotLowLevels.insert(0, regPivotLowVal)
             self.pivotLowBars.insert(0, pBar)
-            if len(self.pivotLowLevels) > 20:
+            if len(self.pivotLowLevels) > self.pivotCap:
                 self.pivotLowLevels.pop()
                 self.pivotLowBars.pop()
             if self.trendBias == -1:
@@ -379,24 +399,42 @@ class NexusEngine:
                 self.protectedStrongLow = earlyLow20
                 self.protectedStrongLowBar = bi - 10
 
+        if self.v92:
+            # global 50 / 25-bar extremes and the running pullback low / bounce high since the last pivot
+            g_highest50, g_lowest50 = highest(self.H, 50), lowest(self.L, 50)
+            g_lowest25, g_highest25 = globalLowestLow25, globalHighestHigh25
+            if g_lowest25 is not None and low == g_lowest25:
+                self.bullObTop25 = high           # fixnan(low == lowest25 ? high : na)
+            if g_highest25 is not None and high == g_highest25:
+                self.bearObBtm25 = low            # fixnan(high == highest25 ? low : na)
+            if self.runningPullbackLow is None or low < self.runningPullbackLow or isNewPivotHigh:
+                self.runningPullbackLow, self.runningPullbackLowBar = low, bi
+            if self.runningBounceHigh is None or high > self.runningBounceHigh or isNewPivotLow:
+                self.runningBounceHigh, self.runningBounceHighBar = high, bi
+
         isBullishChoch = isBearishChoch = isBullishBos = isBearishBos = False
 
         if self.trendBias == 1:
             if self.activeTargetHigh is not None and close > self.activeTargetHigh:
                 isBullishBos = True
                 self.lastBullChochBodyBreak = (close > open_) and (close > self.activeTargetHigh)
-                if self.v8:
+                if self.v92:
+                    self.protectedStrongLow = nz(self.runningPullbackLow, g_lowest25)
+                    self.protectedStrongLowBar = nz(self.runningPullbackLowBar, bi)
+                    self.activeTargetHigh = None
+                elif self.v8:
                     lenSinceHigh = min(max(bi - nz(self.activeTargetHighBar, 0), 1), min(bi, 150))
                 else:
                     lenSinceHigh = min(max(bi - self.activeTargetHighBar, 1), 500)
-                lowestPullback, lowestBar = low, bi
-                for k in range(0, lenSinceHigh + 1):
-                    lk = self._l(k)
-                    if lt(lk, lowestPullback):
-                        lowestPullback, lowestBar = lk, bi - k
-                self.protectedStrongLow = lowestPullback
-                self.protectedStrongLowBar = lowestBar
-                self.activeTargetHigh = None
+                if not self.v92:
+                    lowestPullback, lowestBar = low, bi
+                    for k in range(0, lenSinceHigh + 1):
+                        lk = self._l(k)
+                        if lt(lk, lowestPullback):
+                            lowestPullback, lowestBar = lk, bi - k
+                    self.protectedStrongLow = lowestPullback
+                    self.protectedStrongLowBar = lowestBar
+                    self.activeTargetHigh = None
             elif (self.protectedStrongLow is not None and close < self.protectedStrongLow
                   and (bi - self.lastBullChochBar) >= 10):
                 isBearishChoch = True
@@ -409,18 +447,23 @@ class NexusEngine:
                 self.bullChochRetested = True
                 self.chochZoneTouchedBear = False
                 self.lastBearChochBodyBreak = (close < open_) and (close < self.protectedStrongLow)
-                majorPeakVal, majorPeakBar = high, bi
-                if self.pivotHighLevels:
-                    majorPeakVal, majorPeakBar = self.pivotHighLevels[0], self.pivotHighBars[0]
-                psl_bar = self.protectedStrongLowBar if self.protectedStrongLowBar is not None else bi - 10
-                if self.v8:
-                    scanLen = min(min(max(bi - min(psl_bar, majorPeakBar), 1), 150), bi)
+                if self.v92:   # highest high of 50 bars, or the last pivot high if that is higher
+                    majorPeakVal, majorPeakBar = g_highest50, bi
+                    if self.pivotHighLevels and gt(self.pivotHighLevels[0], majorPeakVal):
+                        majorPeakVal, majorPeakBar = self.pivotHighLevels[0], self.pivotHighBars[0]
                 else:
-                    scanLen = min(max(bi - min(psl_bar, majorPeakBar), 5), 500)
-                for k in range(0, scanLen + 1):
-                    hk = self._h(k)
-                    if gt(hk, majorPeakVal):
-                        majorPeakVal, majorPeakBar = hk, bi - k
+                    majorPeakVal, majorPeakBar = high, bi
+                    if self.pivotHighLevels:
+                        majorPeakVal, majorPeakBar = self.pivotHighLevels[0], self.pivotHighBars[0]
+                    psl_bar = self.protectedStrongLowBar if self.protectedStrongLowBar is not None else bi - 10
+                    if self.v8:
+                        scanLen = min(min(max(bi - min(psl_bar, majorPeakBar), 1), 150), bi)
+                    else:
+                        scanLen = min(max(bi - min(psl_bar, majorPeakBar), 5), 500)
+                    for k in range(0, scanLen + 1):
+                        hk = self._h(k)
+                        if gt(hk, majorPeakVal):
+                            majorPeakVal, majorPeakBar = hk, bi - k
                 self.protectedStrongHigh = majorPeakVal
                 self.protectedStrongHighBar = majorPeakBar
                 self.protectedStrongLow = None
@@ -431,17 +474,21 @@ class NexusEngine:
             if self.activeTargetLow is not None and close < self.activeTargetLow:
                 isBearishBos = True
                 self.lastBearChochBodyBreak = (close < open_) and (close < self.activeTargetLow)
-                if self.v8:
-                    lenSinceLow = min(max(bi - nz(self.activeTargetLowBar, 0), 1), min(bi, 150))
+                if self.v92:
+                    self.protectedStrongHigh = nz(self.runningBounceHigh, g_highest25)
+                    self.protectedStrongHighBar = nz(self.runningBounceHighBar, bi)
                 else:
-                    lenSinceLow = min(max(bi - self.activeTargetLowBar, 1), 500)
-                highestBounce, highestBar = high, bi
-                for k in range(0, lenSinceLow + 1):
-                    hk = self._h(k)
-                    if gt(hk, highestBounce):
-                        highestBounce, highestBar = hk, bi - k
-                self.protectedStrongHigh = highestBounce
-                self.protectedStrongHighBar = highestBar
+                    if self.v8:
+                        lenSinceLow = min(max(bi - nz(self.activeTargetLowBar, 0), 1), min(bi, 150))
+                    else:
+                        lenSinceLow = min(max(bi - self.activeTargetLowBar, 1), 500)
+                    highestBounce, highestBar = high, bi
+                    for k in range(0, lenSinceLow + 1):
+                        hk = self._h(k)
+                        if gt(hk, highestBounce):
+                            highestBounce, highestBar = hk, bi - k
+                    self.protectedStrongHigh = highestBounce
+                    self.protectedStrongHighBar = highestBar
                 self.activeTargetLow = None
             elif (self.protectedStrongHigh is not None and close > self.protectedStrongHigh
                   and (bi - self.lastBearChochBar) >= 10):
@@ -455,18 +502,23 @@ class NexusEngine:
                 self.bearChochRetested = True
                 self.chochZoneTouchedBull = False
                 self.lastBullChochBodyBreak = (close > open_) and (close > self.protectedStrongHigh)
-                majorValleyVal, majorValleyBar = low, bi
-                if self.pivotLowLevels:
-                    majorValleyVal, majorValleyBar = self.pivotLowLevels[0], self.pivotLowBars[0]
-                psh_bar = self.protectedStrongHighBar if self.protectedStrongHighBar is not None else bi - 10
-                if self.v8:
-                    scanLen = min(min(max(bi - min(psh_bar, majorValleyBar), 1), 150), bi)
+                if self.v92:   # lowest low of 50 bars, or the last pivot low if that is lower
+                    majorValleyVal, majorValleyBar = g_lowest50, bi
+                    if self.pivotLowLevels and lt(self.pivotLowLevels[0], majorValleyVal):
+                        majorValleyVal, majorValleyBar = self.pivotLowLevels[0], self.pivotLowBars[0]
                 else:
-                    scanLen = min(max(bi - min(psh_bar, majorValleyBar), 5), 500)
-                for k in range(0, scanLen + 1):
-                    lk = self._l(k)
-                    if lt(lk, majorValleyVal):
-                        majorValleyVal, majorValleyBar = lk, bi - k
+                    majorValleyVal, majorValleyBar = low, bi
+                    if self.pivotLowLevels:
+                        majorValleyVal, majorValleyBar = self.pivotLowLevels[0], self.pivotLowBars[0]
+                    psh_bar = self.protectedStrongHighBar if self.protectedStrongHighBar is not None else bi - 10
+                    if self.v8:
+                        scanLen = min(min(max(bi - min(psh_bar, majorValleyBar), 1), 150), bi)
+                    else:
+                        scanLen = min(max(bi - min(psh_bar, majorValleyBar), 5), 500)
+                    for k in range(0, scanLen + 1):
+                        lk = self._l(k)
+                        if lt(lk, majorValleyVal):
+                            majorValleyVal, majorValleyBar = lk, bi - k
                 self.protectedStrongLow = majorValleyVal
                 self.protectedStrongLowBar = majorValleyBar
                 self.protectedStrongHigh = None
@@ -545,15 +597,20 @@ class NexusEngine:
             if gt(htfObClose, htfObOpen) and gt(pO, pC):
                 obTop, obBtm = pH, pL
                 if atr14 is not None and le(sub(obTop, obBtm), atr14 * 4.0):
-                    self._push_zone(self.bullObList, Zone(obTop, obBtm, True, birthBar=bi), s.maxOrderBlocks)
+                    self._push_zone(self.bullObList, Zone(obTop, obBtm, True, birthBar=bi), self.zoneCap(s.maxOrderBlocks))
             if lt(htfObClose, htfObOpen) and gt(pC, pO):
                 obTop, obBtm = pH, pL
                 if atr14 is not None and le(sub(obTop, obBtm), atr14 * 4.0):
-                    self._push_zone(self.bearObList, Zone(obTop, obBtm, False, birthBar=bi), s.maxOrderBlocks)
+                    self._push_zone(self.bearObList, Zone(obTop, obBtm, False, birthBar=bi), self.zoneCap(s.maxOrderBlocks))
 
         if not self.useHtfOb:
             # Bullish OB
-            if isBullishChoch or isBullishBos:
+            if self.v92 and (isBullishChoch or isBullishBos):
+                # v9.2: high of the last bar that set the 25-bar low .. the 25-bar low
+                obTop, obBtm = self.bullObTop25, globalLowestLow25
+                if obTop is not None and obBtm is not None and atr14 is not None and (obTop - obBtm) <= atr14 * 3.5:
+                    self._push_zone(self.bullObList, Zone(obTop, obBtm, True, birthBar=bi), self.zoneCap(s.maxOrderBlocks))
+            elif isBullishChoch or isBullishBos:
                 anchorBar = self.protectedStrongLowBar if self.protectedStrongLowBar is not None else bi - 15
                 distFromAnchor = max(bi - anchorBar, 5)
                 lookbackRange = min(max(distFromAnchor + 5, 10), 50)
@@ -565,23 +622,28 @@ class NexusEngine:
                 if lowestRedIdx is not None:
                     obTop, obBtm = self._h(lowestRedIdx), self._l(lowestRedIdx)
                     if atr14 is not None and (obTop - obBtm) <= atr14 * 3.5:
-                        self._push_zone(self.bullObList, Zone(obTop, obBtm, True, birthBar=bi), s.maxOrderBlocks)
+                        self._push_zone(self.bullObList, Zone(obTop, obBtm, True, birthBar=bi), self.zoneCap(s.maxOrderBlocks))
             else:
                 canAdd = False
                 if isBullishDisplacement and bi > 5:
                     if not self.bullObList or (bi - self.bullObList[-1].birthBar) > 5:
                         canAdd = True
                 if canAdd:
-                    obIdx = 3
-                    for k in range(2, 6):
+                    obIdx = 2 if self.v92 else 3            # v9.2: first red candle of bars 2..4, else bar 2
+                    for k in range(2, 5 if self.v92 else 6):
                         if lt(self._c(k), self._o(k)):
                             obIdx = k
                             break
                     obTop, obBtm = self._h(obIdx), self._l(obIdx)
                     if atr14 is not None and (obTop - obBtm) <= atr14 * 3.5:
-                        self._push_zone(self.bullObList, Zone(obTop, obBtm, True, birthBar=bi), s.maxOrderBlocks)
+                        self._push_zone(self.bullObList, Zone(obTop, obBtm, True, birthBar=bi), self.zoneCap(s.maxOrderBlocks))
             # Bearish OB
-            if isBearishChoch or isBearishBos:
+            if self.v92 and (isBearishChoch or isBearishBos):
+                # v9.2: the 25-bar high .. low of the last bar that set it
+                obTop, obBtm = globalHighestHigh25, self.bearObBtm25
+                if obTop is not None and obBtm is not None and atr14 is not None and (obTop - obBtm) <= atr14 * 3.5:
+                    self._push_zone(self.bearObList, Zone(obTop, obBtm, False, birthBar=bi), self.zoneCap(s.maxOrderBlocks))
+            elif isBearishChoch or isBearishBos:
                 anchorBar = self.protectedStrongHighBar if self.protectedStrongHighBar is not None else bi - 15
                 distFromAnchor = max(bi - anchorBar, 5)
                 lookbackRange = min(max(distFromAnchor + 5, 10), 50)
@@ -593,21 +655,21 @@ class NexusEngine:
                 if highestGreenIdx is not None:
                     obTop, obBtm = self._h(highestGreenIdx), self._l(highestGreenIdx)
                     if atr14 is not None and (obTop - obBtm) <= atr14 * 3.5:
-                        self._push_zone(self.bearObList, Zone(obTop, obBtm, False, birthBar=bi), s.maxOrderBlocks)
+                        self._push_zone(self.bearObList, Zone(obTop, obBtm, False, birthBar=bi), self.zoneCap(s.maxOrderBlocks))
             else:
                 canAdd = False
                 if isBearishDisplacement and bi > 5:
                     if not self.bearObList or (bi - self.bearObList[-1].birthBar) > 5:
                         canAdd = True
                 if canAdd:
-                    obIdx = 3
-                    for k in range(2, 6):
+                    obIdx = 2 if self.v92 else 3            # v9.2: first green candle of bars 2..4, else bar 2
+                    for k in range(2, 5 if self.v92 else 6):
                         if gt(self._c(k), self._o(k)):
                             obIdx = k
                             break
                     obTop, obBtm = self._h(obIdx), self._l(obIdx)
                     if atr14 is not None and (obTop - obBtm) <= atr14 * 3.5:
-                        self._push_zone(self.bearObList, Zone(obTop, obBtm, False, birthBar=bi), s.maxOrderBlocks)
+                        self._push_zone(self.bearObList, Zone(obTop, obBtm, False, birthBar=bi), self.zoneCap(s.maxOrderBlocks))
 
         # FVG creation
         fvgMult = max(0.0, float(s.fvgAtrMultiplier))
@@ -621,16 +683,16 @@ class NexusEngine:
                     h3_, c2_, l1_ = b3[1], b2[3], b1[2]
                     h1_, l3_ = b1[1], b3[2]
                     if l1_ > h3_ and c2_ > h3_ and (l1_ - h3_) >= hAtr * fvgMult:
-                        self._push_zone(self.bullFvgList, Zone(l1_, h3_, True, birthBar=bi), s.maxFvgCount)
+                        self._push_zone(self.bullFvgList, Zone(l1_, h3_, True, birthBar=bi), self.zoneCap(s.maxFvgCount))
                     if h1_ < l3_ and c2_ < l3_ and (l3_ - h1_) >= hAtr * fvgMult:
-                        self._push_zone(self.bearFvgList, Zone(l3_, h1_, False, birthBar=bi), s.maxFvgCount)
+                        self._push_zone(self.bearFvgList, Zone(l3_, h1_, False, birthBar=bi), self.zoneCap(s.maxFvgCount))
         elif bi >= 4 and atr14 is not None:
             l1_, h3_, c2_ = self._l(1), self._h(3), self._c(2)
             h1_, l3_ = self._h(1), self._l(3)
             if l1_ > h3_ and c2_ > h3_ and (l1_ - h3_) >= atr14 * fvgMult:
-                self._push_zone(self.bullFvgList, Zone(l1_, h3_, True, birthBar=bi), s.maxFvgCount)
+                self._push_zone(self.bullFvgList, Zone(l1_, h3_, True, birthBar=bi), self.zoneCap(s.maxFvgCount))
             if h1_ < l3_ and c2_ < l3_ and (l3_ - h1_) >= atr14 * fvgMult:
-                self._push_zone(self.bearFvgList, Zone(l3_, h1_, False, birthBar=bi), s.maxFvgCount)
+                self._push_zone(self.bearFvgList, Zone(l3_, h1_, False, birthBar=bi), self.zoneCap(s.maxFvgCount))
 
         # OB first-touch / mitigation
         touchBullObFirst = touchBearObFirst = False
@@ -652,7 +714,7 @@ class NexusEngine:
                 if not ob.tested and (isTouchingNow or inRetestWindow):
                     touchBullObFirst = True
                     matchingBullObIdx = i
-                if s.fix_ob_mitigation:  # Pine bug: `=` instead of `:=` makes this dead code
+                if s.fix_ob_mitigation or self.v92:  # Pine bug before v9.2: `=` instead of `:=` made this dead code
                     if s.obMitigation == "Wick Touch":
                         byStyle = ob.touchBar > 0 and (bi - ob.touchBar) >= 1 and low <= ob.top
                     elif s.obMitigation == "50% Mean Threshold":
@@ -678,7 +740,7 @@ class NexusEngine:
                 if not ob.tested and (isTouchingNow or inRetestWindow):
                     touchBearObFirst = True
                     matchingBearObIdx = i
-                if s.fix_ob_mitigation:
+                if s.fix_ob_mitigation or self.v92:
                     if s.obMitigation == "Wick Touch":
                         byStyle = ob.touchBar > 0 and (bi - ob.touchBar) >= 1 and high >= ob.bottom
                     elif s.obMitigation == "50% Mean Threshold":
@@ -893,7 +955,9 @@ class NexusEngine:
 
         # ============================================================ 9. SL & TARGET
         triggerBuy = triggerSell = False
-        if candidateBuy:
+        # v9.2 circuit breaker: after 2 consecutive losses no new entry until holdUntil (bar time)
+        onHold = (self.v92 and s.enableLossHold and self.holdUntil is not None and bar.time < self.holdUntil)
+        if candidateBuy and not onHold:
             r = self._plan_trade(1, close, atr14, recentBullIdmSweep, lowest(self.L, slLb), highest(self.H, slLb))
             if r:
                 calcEntry, calcSl, slDist, calcTarget, plannedRr = r
@@ -916,7 +980,7 @@ class NexusEngine:
                     self.bullFvgList[matchingBullFvgIdx].mitigated = True
                 self.lastBullSweepBar = -100
 
-        if candidateSell:
+        if candidateSell and not onHold:
             r = self._plan_trade(-1, close, atr14, recentBearIdmSweep, lowest(self.L, slLb), highest(self.H, slLb))
             if r:
                 calcEntry, calcSl, slDist, calcTarget, plannedRr = r
@@ -966,7 +1030,12 @@ class NexusEngine:
             "triggerBuy": triggerBuy, "triggerSell": triggerSell,
             "activeTradeDir": self.activeTradeDir, "slPrice": self.slPrice, "targetPrice": self.targetPrice,
             "tp1Hit": self.tp1Hit, "accumulatedNetR": self.accumulatedNetR,
+            "onHold": onHold, "consecutiveLosses": self.consecutiveLosses,
         }
+        if self.v92:   # v9.2 end of bar: lists with more than 3 zones drop their mitigated zones
+            for lst in (self.bullObList, self.bearObList, self.bullFvgList, self.bearFvgList):
+                if len(lst) > 3:
+                    lst[:] = [z for z in lst if not z.mitigated]
         return events
 
     # ------------------------------------------------------------------ helpers
@@ -1013,7 +1082,10 @@ class NexusEngine:
     def _plan_trade(self, d: int, close: float, atr14, recentSweep: bool, ll25, hh25):  # ll25/hh25 = swing lookback extremes
         s = self.s
         calcEntry = close
-        if s.slMode == "Fixed Points (Preset)":
+        if self.v92 and s.slMode == "ATR Adaptive (3.0x)":
+            atrSl = max(65.0, min(140.0, atr14 * 3.0)) if atr14 is not None else None
+            calcSl = None if atrSl is None else calcEntry - d * atrSl
+        elif s.slMode == "Fixed Points (Preset)":
             pts = 70.0 if s.slFixedPreset == "70 Points" else (80.0 if s.slFixedPreset == "80 Points" else 90.0)
             calcSl = calcEntry - d * pts
         elif s.slMode == "Custom Points":
@@ -1115,11 +1187,26 @@ class NexusEngine:
                 self.lossTradesCount += 1
                 self.lastLossBarIndex = bi
                 self.lastLossDir = d
+            if self.v92:
+                self._count_result(pnl > 0)
             self._exit(d, "CHOCH", close, pnl / denom, pnl, tstr, events)
 
         # v8.7 "options quant" win: target, OR +/-70 pts from entry, OR >= 12 bars held with >= +/-45 pts open profit
         quant_px, quant_reason = None, ""
-        if self.v87:
+        if self.v92:   # v9.2: target, OR >= 8 bars held with close >= +0.5R (the +70 pts exit is gone)
+            held = bi - self.lastSignalBarIndex
+            decay = self.initialRiskPoints * 0.50
+            if d == 1:
+                if high >= self.targetPrice or open_ >= self.targetPrice:
+                    quant_px, quant_reason = self.targetPrice, "TARGET"
+                elif held >= 8 and close >= self.entryPrice + decay:
+                    quant_px, quant_reason = close, "DECAY_8"
+            else:
+                if low <= self.targetPrice or open_ <= self.targetPrice:
+                    quant_px, quant_reason = self.targetPrice, "TARGET"
+                elif held >= 8 and close <= self.entryPrice - decay:
+                    quant_px, quant_reason = close, "DECAY_8"
+        elif self.v87:
             held = bi - self.lastSignalBarIndex
             if d == 1:
                 if high >= self.targetPrice or open_ >= self.targetPrice:
@@ -1138,10 +1225,10 @@ class NexusEngine:
 
         if d == 1:
             collision = high >= self.tp1Price and low <= self.slPrice
-            tp1_touch = high >= self.tp1Price or (self.v87 and high >= self.entryPrice + 70.0)
+            tp1_touch = high >= self.tp1Price or (self.v87 and not self.v92 and high >= self.entryPrice + 70.0)
         else:
             collision = low <= self.tp1Price and high >= self.slPrice
-            tp1_touch = low <= self.tp1Price or (self.v87 and low <= self.entryPrice - 70.0)
+            tp1_touch = low <= self.tp1Price or (self.v87 and not self.v92 and low <= self.entryPrice - 70.0)
         if tp1_touch and not self.tp1Hit and not collision:
             self.tp1Hit = True
             self.tp1HitBarIndex = bi
@@ -1164,9 +1251,16 @@ class NexusEngine:
             tgt_hit = low <= self.targetPrice or open_ <= self.targetPrice
             sl_exit_px = open_ if open_ >= self.slPrice else self.slPrice
 
+        isRealBe = (s.enableBreakEven and self.tp1Hit and bi > self.tp1HitBarIndex
+                    and ((self.slPrice >= self.entryPrice) if d == 1 else (self.slPrice <= self.entryPrice)))
+        if self.v92:
+            # Pine runs this block even when a CHoCH closed the trade earlier in the same bar, so mirror it
+            if sl_hit:
+                if not isRealBe:
+                    self._count_result(False)
+            elif quant_px is not None and d == -1:   # Pine resets the streak on a SHORT quant win only
+                self.consecutiveLosses = 0
         if self.activeTradeDir == d and sl_hit:
-            isRealBe = (s.enableBreakEven and self.tp1Hit and bi > self.tp1HitBarIndex
-                        and ((self.slPrice >= self.entryPrice) if d == 1 else (self.slPrice <= self.entryPrice)))
             if isRealBe:
                 self.beTradesCount += 1
                 pnl = (sl_exit_px - self.entryPrice) * d - cost
@@ -1187,17 +1281,27 @@ class NexusEngine:
             realized = self.currentTradeRr - cost / denom
             pnl = abs(self.targetPrice - self.entryPrice) - cost
             self._exit(d, "TARGET", self.targetPrice, realized, pnl, tstr, events)
-        elif self.activeTradeDir == d and (bi - self.lastSignalBarIndex) >= s.maxTradeDuration:
+        elif (self.activeTradeDir == d and (not self.v92 or s.enableTimeExit)
+              and (bi - self.lastSignalBarIndex) >= s.maxTradeDuration):
             self.timeTradesCount += 1
             pnl = (close - self.entryPrice) * d - cost
             self._exit(d, "TIME", close, pnl / denom, pnl, tstr, events)
 
+    def _count_result(self, win: bool):
+        """v9.2 circuit breaker: 2 losses in a row pause new entries for holdDurationHours (bar time)."""
+        if win:
+            self.consecutiveLosses = 0
+            return
+        self.consecutiveLosses += 1
+        if self.consecutiveLosses >= 2 and self.s.enableLossHold and self.last_bar_time is not None:
+            self.holdUntil = self.last_bar_time + timedelta(hours=int(self.s.holdDurationHours))
+
     def effective_target(self):
         """Price at which the open trade is a win on a live tick. v8.7 books a win at +/-70 pts, so it is the nearer of
-        the planned target and entry +/- 70; earlier versions use the planned target."""
+        the planned target and entry +/- 70; the other versions (incl. v9.2) use the planned target."""
         if self.targetPrice is None:
             return None
-        if self.v87 and self.entryPrice is not None and self.activeTradeDir:
+        if self.v87 and not self.v92 and self.entryPrice is not None and self.activeTradeDir:
             d = self.activeTradeDir
             return min(self.targetPrice, self.entryPrice + 70.0) if d == 1 else max(self.targetPrice, self.entryPrice - 70.0)
         return self.targetPrice
@@ -1218,4 +1322,6 @@ class NexusEngine:
             "dir": self.activeTradeDir, "trigger": self.activeTradeTrigger, "entry": self.entryPrice,
             "sl": self.slPrice, "target": self.targetPrice, "tp1": self.tp1Price, "tp1Hit": self.tp1Hit,
             "rr": self.currentTradeRr, "entry_bar": self.lastSignalBarIndex,
+            "consecutiveLosses": self.consecutiveLosses,
+            "holdUntil": self.holdUntil.isoformat() if self.holdUntil is not None else None,
         }

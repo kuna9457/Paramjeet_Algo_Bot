@@ -9,7 +9,7 @@ from typing import Dict, List, Optional
 from kiteconnect import KiteConnect
 
 from ..data.candle import Candle, now_ist, to_ist, session_open_dt
-from .base import Broker, BrokerError, Instrument, OrderResult
+from .base import Broker, BrokerError, Instrument, OptionQuote, OrderResult
 
 log = logging.getLogger("zerodha")
 NIFTY_INDEX_TOKEN = 256265
@@ -115,6 +115,28 @@ class ZerodhaBroker(Broker):
             data = self._call(self.kc.ltp, chunk)
             for k, v in data.items():
                 out[k] = float(v.get("last_price") or 0)
+        return out
+
+    def option_chain(self, expiry, strikes):
+        """LTP + best bid / ask (market depth) for every CE / PE of the strikes, via kite.quote()."""
+        insts = []
+        for k in strikes:
+            for t in ("CE", "PE"):
+                i = self.option_instrument(expiry, k, t)
+                if i:
+                    insts.append(i)
+        out = []
+        for n in range(0, len(insts), 500):
+            chunk = insts[n:n + 500]
+            data = self._call(self.kc.quote, [x.key for x in chunk])
+            for x in chunk:
+                q = data.get(x.key) or {}
+                ltp = float(q.get("last_price") or 0)
+                dep = q.get("depth") or {}
+                bid = float(((dep.get("buy") or [{}])[0] or {}).get("price") or 0)
+                ask = float(((dep.get("sell") or [{}])[0] or {}).get("price") or 0)
+                if ltp > 0:
+                    out.append(OptionQuote(x.strike, x.opt_type, ltp, x, bid, ask))
         return out
 
     # ------------------------------------------------------------------ orders

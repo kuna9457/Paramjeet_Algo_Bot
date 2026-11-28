@@ -10,12 +10,12 @@ from datetime import date
 from typing import List, Optional
 
 from ..brokers.base import Instrument, OptionQuote
-from ..hedge.expiry import choose_expiry
+from ..hedge.expiry import expiry_for
 from ..hedge.scanner import find_pair, range_text, strike_window
 from ..strategy.engine import Event
 from . import messages as M
 
-SAMPLE_LOT = 75
+SAMPLE_LOT = 65   # current NIFTY lot size (the real bot uses the exchange value from the broker)
 
 
 def _sample_chain(ref: float, expiry: date, lot: int) -> List[OptionQuote]:
@@ -28,8 +28,10 @@ def _sample_chain(ref: float, expiry: date, lot: int) -> List[OptionQuote]:
         ce = max(atm - k, 0) + tv
         pe = max(k - atm, 0) + tv
         for t, px in (("CE", ce), ("PE", pe)):
-            out.append(OptionQuote(k, t, round(max(px, 5.0), 2),
-                                   Instrument(f"SAMPLE:{int(k)}{t}", f"NIFTY{expiry:%d%b%y}{int(k)}{t}".upper(), expiry, k, t, lot)))
+            px = round(max(px, 5.0), 2)
+            out.append(OptionQuote(k, t, px,
+                                   Instrument(f"SAMPLE:{int(k)}{t}", f"NIFTY{expiry:%d%b%y}{int(k)}{t}".upper(), expiry, k, t, lot),
+                                   round(px - 0.05, 2), round(px + 0.05, 2)))
     return out
 
 
@@ -41,11 +43,10 @@ def simulate(side: str, S, data=None, notify_prefix: str = "🧪 TEST - no order
     today = date.today()
     sample = data is None
     if sample:
-        ref, expiry, lot = 23500.0, date.fromordinal(today.toordinal() + 3), SAMPLE_LOT
+        ref, expiry, lot = 23500.0, date.fromordinal(today.toordinal() + 8), SAMPLE_LOT
         chain = _sample_chain(ref, expiry, lot)
     else:
-        expiry, _ = choose_expiry(data.option_expiries(), H.expiry_mode, today, H.get("expiry_date", ""),
-                                  bool(H.get("use_next_expiry_on_expiry_day", True)))
+        expiry, _ = expiry_for(data.option_expiries(), H, today)
         inst = data.signal_instrument(S.bot.signal_symbol)
         ref = data.ltp([inst]).get(inst.key)
         _, strikes = strike_window(ref, int(H.strike_step), int(H.strike_scan_width))
@@ -56,9 +57,13 @@ def simulate(side: str, S, data=None, notify_prefix: str = "🧪 TEST - no order
                    "100 Points": 100}.get(str(S.strategy.slFixedPreset))
     if sl_mode_pts and S.strategy.slMode.startswith("Fixed"):
         sl_pts = float(sl_mode_pts)
+    elif S.strategy.slMode.startswith("ATR"):
+        sl_pts = 90.0                                   # sample: 3.0 x ATR on a normal-volatility day
+    rr = max(1.5 if S.strategy.strategy_version != "v9.2" else 1.25, float(S.strategy.minTargetRr))
+    tp1_r = float(S.strategy.tp1RrMultiple) if S.strategy.strategy_version == "v9.2" else 1.0
     px = round(ref, 2)
     ev = Event("ENTRY", 1, f"{today.isoformat()}T10:15:00+05:30", d, "OB" if buy else "FVG", px,
-               px - d * sl_pts, px + d * sl_pts * 1.5, px + d * sl_pts, 1.5)
+               px - d * sl_pts, px + d * sl_pts * rr, px + d * sl_pts * tp1_r, rr)
     tid = _tid(ev)
     out = [M.signal_msg(tid, ev, str(S.strategy.strategy_version))]
     if not pair:

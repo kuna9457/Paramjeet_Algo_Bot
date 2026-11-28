@@ -21,10 +21,10 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv, set_key
 
-from bot.config import DEFAULT_SETTINGS, ROOT, STRATEGY_VERSIONS, env, load_preset, load_settings
+from bot.config import DEFAULT_SETTINGS, ROOT, SL_MODES, STRATEGY_VERSIONS, env, load_preset, load_settings
 from bot.data.candle import now_ist
 from bot.services.notifier import Notifier
-from bot.services.storage import LocalStorage, make_storage
+from bot.services.storage import LocalStorage, ResilientMongoStorage, make_storage
 from bot.services.tokens import ENV_KEYS, save_token, token_day
 from bot.ui import charts, process, settings_io, signal_view
 
@@ -34,7 +34,7 @@ ON_RENDER = bool(os.getenv("RENDER"))   # set automatically by Render
 
 # ====================================================================================== helpers
 PINE_TITLES = {
-    "strategy_version": "Strategy Logic Version (v7.4 original / v8.0 / v8.7 latest)",
+    "strategy_version": "Strategy Logic Version (v7.4 original / v8.0 / v8.7 / v9.2 latest)",
     "strictTriggerLock": "Strict Lock Per Trigger (v8.0 / v8.7: no duplicate FVG/IDM/OB/CHoCH till its Target/SL)",
     "strat1_IDM": "Enable IDM Pullback Trigger", "idmTf": "IDM Sweep Timeframe",
     "idmLookback": "IDM Minor Pivot Lookback (Bars)", "strat6_IDM_Precision": "Require Strict OB/FVG Confluence for IDM",
@@ -65,6 +65,8 @@ PINE_TITLES = {
     "tp1RrMultiple": "TP1 Milestone R:R (Triggers Break-Even)",
     "strat15_LiquidityRun": "Target Nearest Institutional Swing Liquidity",
     "costPerTradePoints": "Estimated Cost / Slippage (Points per Trade)", "maxTradeDuration": "Max Swing Hold Duration (Bars)",
+    "enableTimeExit": "Enable Time-Based Exit (v9.2; OFF = pure swing)",
+    "enableLossHold": "Hold Trading after 2 Consecutive Losses (v9.2)", "holdDurationHours": "Hold Duration (Hours, v9.2)",
     "fix_sl_lookback": "Apply Swing SL Lookback (Pine ignores it; false = identical to TradingView)",
     "fix_ob_mitigation": "Fix Pine OB-mitigation quirk (false = identical to TradingView)",
 }
@@ -74,15 +76,20 @@ CHOICES = {
     "bot.signal_symbol": ["NIFTY_SPOT", "NIFTY_FUT"], "bot.exit_monitoring": ["tick", "candle_close"],
     "brokers.data_source": ["upstox", "zerodha"], "brokers.product": ["NRML", "MIS"],
     "brokers.order_type": ["LIMIT", "MARKET"], "brokers.leg_order": ["buy_first", "simultaneous"],
-    "hedge.expiry_mode": ["nearest_weekly", "next_weekly", "current_monthly", "next_monthly", "fixed_date"],
+    "hedge.expiry_mode": ["min_days", "nearest_weekly", "next_weekly", "current_monthly", "next_monthly", "fixed_date"],
+    "hedge.strike_mode": ["atm_offset", "premium_band"],
+    "hedge.sell_otm_points": [0, 50, 100, 150],
+    "hedge.hedge_otm_points": [100, 150, 200, 250, 300, 350, 400],
     "hedge.buy_strike_rule": ["any", "ends_with_00", "ends_with_50"],
     "hedge.sell_strike_rule": ["ends_with_50", "ends_with_00", "any"],
+    "hedge.atm_sell_strike_rule": ["ends_with_00", "ends_with_50", "any"],
+    "hedge.atm_buy_strike_rule": ["ends_with_50", "ends_with_00", "any"],
     "storage.backend": ["mongo", "local"],
     "strategy.strategy_version": list(STRATEGY_VERSIONS),
     "strategy.idmTf": TF_OPTS, "strategy.chochStructureTf": TF_OPTS, "strategy.obTimeframe": TF_OPTS, "strategy.fvgTimeframe": TF_OPTS,
     "strategy.htfTimeframe": TF_OPTS,
     "strategy.obMitigation": ["Wick Touch", "50% Mean Threshold", "Full Candle Body"],
-    "strategy.slMode": ["Fixed Points (Preset)", "Swing High/Low", "Custom Points"],
+    "strategy.slMode": list(SL_MODES),
     "strategy.slFixedPreset": ["70 Points", "80 Points", "90 Points"],
     "strategy.subMinTargetAction": ["Extend to Min R:R", "Skip Trade"],
 }
@@ -97,7 +104,7 @@ def S():
 
 @st.cache_resource(show_spinner="Connecting to storage ...")
 def _storage(backend: str, uri: str, db: str):
-    return make_storage(backend, uri, db, ROOT / "data_cache")
+    return make_storage(backend, uri, db, ROOT / "data_cache", role="dashboard")
 
 
 def storage():
@@ -197,17 +204,24 @@ def _hms(x) -> str:
     return "" if t is None or pd.isna(t) else t.strftime("%H:%M:%S")
 
 
+def _dhm(x) -> str:
+    t = parse_t(x) if x else None
+    return "" if t is None or pd.isna(t) else t.strftime("%d-%b %H:%M")
+
+
 def trades_today_panel(today_c: list, events: list, actions: list | None = None) -> None:
-    """Today's option combos (the 'trade punches') and strategy signals, newest first."""
+    """Trades live today (incl. carried overnight) and today's strategy signals, newest first."""
     st.subheader("🧾 Trades today")
     if not today_c:
-        st.info("No trades yet today. Entries appear here the moment the bot places them.")
+        st.info("No open or closed trades today. Entries appear here the moment the bot places them.")
     else:
         rows = []
         for c in sorted(today_c, key=lambda x: str(x.get("opened_at", "")), reverse=True):
             b, sl = c.get("buy") or {}, c.get("sell") or {}
             pnl = c.get("pnl") or {}
-            rows.append({"opened": _hms(c.get("opened_at")), "closed": _hms(c.get("closed_at")),
+            carried = str(c.get("opened_at", ""))[:10] < now_ist().date().isoformat()
+            rows.append({"opened": _dhm(c.get("opened_at")), "closed": _dhm(c.get("closed_at")),
+                         "carried": "overnight" if carried else "",
                          "mode": combo_mode(c), "side": c.get("side"), "trigger": c.get("trigger"),
                          "status": c.get("status"), "BUY leg": f"{b.get('strike', '')} {b.get('type', '')}".strip(),
                          "SELL leg": f"{sl.get('strike', '')} {sl.get('type', '')}".strip(),
@@ -351,13 +365,13 @@ def page_control():
         combos = st_.find("combos")
         open_c = [x for x in combos if x.get("status") in ("OPEN", "CLOSE_FAILED", "OPENING")]
         today = now_ist().date().isoformat()
-        today_c = [x for x in combos if str(x.get("opened_at", "")).startswith(today)]
-        realized = sum(combo_total(x) for x in today_c if x.get("status") == "CLOSED")
+        today_c = [x for x in combos if signal_view.active_between(x, today, today)]
+        realized = sum(combo_total(x) for x in combos if signal_view.closed_on(x, today))
         mtm_all = doc.get("mtm") or {}
         unreal = sum(sum(v.values()) for v in mtm_all.values()) if mtm_all else 0.0
         k = st.columns(4)
         k[0].metric("Open combos", len(open_c))
-        k[1].metric("Today's combos", len(today_c))
+        k[1].metric("Trades today", len(today_c), help="Opened today, closed today or carried overnight")
         k[2].metric("Realized P&L today", f"₹{realized:,.0f}")
         k[3].metric("Open MTM", f"₹{unreal:,.0f}" if mtm_all else "—")
 
@@ -376,6 +390,16 @@ def page_control():
             if any(x.get("status") == "CLOSE_FAILED" for x in open_c):
                 st.error("🚨 A combo exit failed – the bot retries every 30 s. Check broker positions now.")
 
+        st.divider()
+        left, right = st.columns([3, 2], gap="medium")
+        with left:
+            trades_today_panel(today_c, [e for e in st_.find("events") if str(e.get("time", "")).startswith(today)],
+                               st_.find("signal_actions"))
+        with right:
+            st.subheader("📟 Activity log")
+            activity_log_panel()
+
+        st.divider()
         chart = st_.find_one("chart", {"id": "live"})
         if chart and chart.get("bars"):
             df = charts.bars_frame(chart["bars"])
@@ -391,15 +415,6 @@ def page_control():
             st.plotly_chart(fig, width="stretch", key="livechart")
         else:
             st.info("The live chart appears after the bot finishes its warm-up.")
-
-        st.divider()
-        left, right = st.columns([3, 2], gap="medium")
-        with left:
-            trades_today_panel(today_c, [e for e in st_.find("events") if str(e.get("time", "")).startswith(today)],
-                               st_.find("signal_actions"))
-        with right:
-            st.subheader("📟 Activity log")
-            activity_log_panel()
 
     live_panel()
 
@@ -456,7 +471,7 @@ def page_control():
 
 
 def scan_now(side: str):
-    from bot.hedge.expiry import choose_expiry
+    from bot.hedge.expiry import expiry_for
     from bot.hedge.scanner import find_pair, range_text, strike_window
     from bot.live.runner import build_broker
     s = S()
@@ -466,8 +481,7 @@ def scan_now(side: str):
             b = build_broker(s.brokers.data_source, storage())
             b.connect()
             b.load_instruments()
-            exp, note = choose_expiry(b.option_expiries(), H.expiry_mode, now_ist().date(), H.get("expiry_date", ""),
-                                      bool(H.get("use_next_expiry_on_expiry_day", True)))
+            exp, note = expiry_for(b.option_expiries(), H, now_ist().date())
             if note:
                 st.warning(note)
             inst = b.signal_instrument(s.bot.signal_symbol)
@@ -494,7 +508,19 @@ def _push_settings():
         st.warning(f"Settings saved locally but not backed up to MongoDB: {e}")
 
 
-EXPIRY_AUTO = {"nearest_weekly": "Nearest upcoming expiry (recommended, auto)",
+HEDGE_TITLES = {
+    "strike_mode": "Strike rule (atm_offset = sell ATM / OTM + fixed hedge · premium_band = by premium)",
+    "sell_otm_points": "Sell strike: ATM up to this many points OTM", "hedge_otm_points": "Hedge strike: points OTM from ATM",
+    "atm_sell_min_premium": "Sell leg MIN premium", "atm_sell_max_premium": "Sell leg MAX premium",
+    "sell_min_premium": "Sell leg MIN premium", "sell_max_premium": "Sell leg MAX premium",
+    "max_bid_ask_spread": "Max bid-ask spread per leg (₹)", "min_days_to_expiry": "Min days to expiry",
+    "max_days_to_expiry": "Max days to expiry (0 = no limit)",
+    "atm_sell_strike_rule": "Sold strike must end with", "atm_buy_strike_rule": "Hedge strike must end with",
+}
+
+
+EXPIRY_AUTO = {"min_days": "First expiry with at least N days left (client sheet: 7+, never 0/1 day)",
+               "nearest_weekly": "Nearest upcoming expiry (auto)",
                "next_weekly": "The expiry after the nearest (auto)",
                "current_monthly": "Current monthly expiry (auto)",
                "next_monthly": "Next monthly expiry (auto)"}
@@ -511,7 +537,7 @@ def _expiry_widget(flat, prefix="set:"):
         opts = []
     labels = dict(EXPIRY_AUTO)
     labels.update({"fixed:" + o["date"]: "Exact date: " + o["label"] for o in opts})
-    cur = "fixed:" + fixed if mode == "fixed_date" else (mode if mode in EXPIRY_AUTO else "nearest_weekly")
+    cur = "fixed:" + fixed if mode == "fixed_date" else (mode if mode in EXPIRY_AUTO else "min_days")
     if cur not in labels:     # saved date is no longer listed (expired): show it, the bot falls back to the nearest
         labels[cur] = f"Exact date: {fixed} (not in the broker list - nearest will be used)"
     keys = list(labels)
@@ -581,38 +607,75 @@ def hedge_layout(flat, comments) -> dict:
         return out[p]
 
     st.caption("BUY signal → SELL PUT + BUY a lower-strike PUT (hedge) · SELL signal → SELL CALL + BUY a higher-strike "
-               "CALL (hedge). An order is placed only when both legs fit the premium ranges below. All of this runs only "
+               "CALL (hedge). An order is placed only when both legs fit the rules below. All of this runs only "
                "after a signal; it never changes signal generation.")
     st.markdown("##### 1 · Expiry")
     c1, c2, c3 = st.columns(3)
     with c1:
-        w("expiry_mode")
+        mode = w("expiry_mode")
         w("expiry_date")
     with c2:
+        if mode == "min_days":
+            w("min_days_to_expiry")
+            w("max_days_to_expiry")
+            st.caption("Weekly or monthly - the first expiry with at least this many days left (max 0 = no limit).")
+        else:
+            used.update({"min_days_to_expiry", "max_days_to_expiry"})
         w("use_next_expiry_on_expiry_day")
     with c3:
         w("expiry_day_exit")
         w("expiry_exit_time")
     st.caption("Exact dates come from the broker (use the refresh button above the tabs).")
     st.divider()
-    st.markdown("##### 2 · Sell premium and hedge range")
+    st.markdown("##### 2 · Strikes, sell premium and hedge")
+    smode = w("strike_mode")
+    ATM_KEYS = {"sell_otm_points", "hedge_otm_points", "atm_sell_min_premium", "atm_sell_max_premium",
+                "atm_sell_strike_rule", "atm_buy_strike_rule"}
+    BAND_KEYS = {"sell_strike_rule", "sell_min_premium", "sell_max_premium", "buy_strike_rule", "hedge_diff_min",
+                 "hedge_diff_max"}
     cs, cb = st.columns(2)
-    with cs:
-        st.markdown("**🔴 SELL leg** (PUT on BUY signal · CALL on SELL signal)")
-        w("sell_strike_rule")
-        w("sell_min_premium")
-        w("sell_max_premium")
-    with cb:
-        st.markdown("**🟢 BUY leg – hedge** (strike beyond the sold strike)")
-        w("buy_strike_rule")
-        st.markdown("Range: **Sell premium − Buy premium**")
-        w("hedge_diff_min")
-        w("hedge_diff_max")
-    st.caption("0 = no limit on that side. The bot sells the option with the highest premium inside the sell range "
-               "(e.g. closest to 55), then buys the nearest hedge strike beyond it where Sell − Buy premium is inside "
-               "the range (e.g. sell 52, range 10-15 → hedge premium 37-42). "
-               "Strike rule: any / ends_with_00 / ends_with_50.")
-    w("min_leg_premium")
+    if smode == "atm_offset":
+        used.update(BAND_KEYS)
+        with cs:
+            st.markdown("**🔴 SELL leg** (PUT on BUY signal · CALL on SELL signal)")
+            w("sell_otm_points")
+            w("atm_sell_strike_rule")
+            st.markdown("Sell leg premium (0 = no limit)")
+            w("atm_sell_min_premium")
+            w("atm_sell_max_premium")
+        with cb:
+            st.markdown("**🟢 BUY leg – hedge**")
+            w("hedge_otm_points")
+            w("atm_buy_strike_rule")
+        st.caption("Sells the ATM option or one up to the chosen points out of the money whose strike has the chosen "
+                   "ending (the richest one inside the min / max premium), and hedges with the strike of the chosen "
+                   "ending nearest to the hedge distance (a tie goes to the one nearer ATM). Example with sold = 00, "
+                   "hedge = 50, 50 / 200 OTM: Nifty 25,910 (ATM 25900) BUY → SELL 25900 PE + BUY 25750 PE; "
+                   "Nifty 25,940 (ATM 25950) BUY → SELL 25900 PE + BUY 25750 PE; SELL signals mirror with calls.")
+    else:
+        used.update(ATM_KEYS)
+        with cs:
+            st.markdown("**🔴 SELL leg** (PUT on BUY signal · CALL on SELL signal)")
+            w("sell_strike_rule")
+            st.markdown("Sell leg premium (0 = no limit)")
+            w("sell_min_premium")
+            w("sell_max_premium")
+        with cb:
+            st.markdown("**🟢 BUY leg – hedge** (strike beyond the sold strike)")
+            w("buy_strike_rule")
+            st.markdown("Range: **Sell premium − Buy premium**")
+            w("hedge_diff_min")
+            w("hedge_diff_max")
+        st.caption("0 = no limit on that side. The bot sells the option with the highest premium inside the sell range "
+                   "(e.g. closest to 55), then buys the nearest hedge strike beyond it where Sell − Buy premium is inside "
+                   "the range (e.g. sell 52, range 10-15 → hedge premium 37-42). "
+                   "Strike rule: any / ends_with_00 / ends_with_50.")
+    c1, c2 = st.columns(2)
+    with c1:
+        w("max_bid_ask_spread")
+        st.caption("Both legs: an option whose bid-ask spread is wider than this (₹) is skipped. 0 = off.")
+    with c2:
+        w("min_leg_premium")
     st.divider()
     st.markdown("##### 3 · Strike scan")
     c1, c2, c3, c4 = st.columns(4)
@@ -650,6 +713,7 @@ def _widget(path, value, comments, prefix="set:", flat=None):
     if key == "hedge.expiry_date" and flat is not None:
         return st.session_state.get("_exp_sel", ("", str(value or "")))[1]
     label = PINE_TITLES.get(name, name.replace("_", " ").capitalize()) if path[0] == "strategy" else \
+        HEDGE_TITLES.get(name, name.replace("_", " ").capitalize()) if path[0] == "hedge" else \
         name.replace("_", " ").capitalize()
     if path[0] == "brokers" and path[1] == "lots":
         label = f"Lots on {name}"
@@ -678,7 +742,7 @@ def preset_panel(flat: dict) -> None:
     """Strategy logic version + one-click load of a version's Pine default settings."""
     cur = str(flat.get(("strategy", "strategy_version")) or "v7.4")
     st.markdown(f"**Strategy logic version in use: `{cur}`**")
-    with st.expander("🔁 Strategy version presets (load all Pine default settings of v7.4 or v8.0)"):
+    with st.expander("🔁 Strategy version presets (load all Pine default settings of a version)"):
         st.caption("Changing only **Strategy Logic Version** (Strategy tab) switches the logic and keeps all your other "
                    "settings. Loading a preset below overwrites every **strategy** setting with that version's Pine "
                    "defaults (bot / broker / hedge / safety settings are untouched). The previous file is kept as a backup "
@@ -886,14 +950,26 @@ def page_login():
     c1, c2 = st.columns(2)
     with c1, st.container(border=True):
         st_ = storage()
-        if isinstance(st_, LocalStorage):
+        if isinstance(st_, ResilientMongoStorage):
+            stt = st_.status()
+            if stt["online"]:
+                st.write(f"🟢 **Storage: MongoDB** (`{stt['db']}`) - connected since {stt['connected_at']}")
+            else:
+                st.write(f"🟠 **Storage: MongoDB offline** - working on local files, reconnecting automatically "
+                         f"every {st_.RETRY_SEC} s")
+                st.caption(f"Last error: {stt['last_error']}")
+            if stt["pending_writes"]:
+                st.caption(f"{stt['pending_writes']} write(s) waiting - they are copied to MongoDB automatically "
+                           f"when it is back.")
+            if not stt["online"] and st.button("Retry now"):
+                st.toast("Connected ✅" if st_.reconnect() else "Still offline - will keep retrying")
+                st.rerun()
+        else:
             st.write("🟡 **Storage: local JSON files** (`data_cache/`)")
             st.caption("Set MONGO_URI below and storage.backend = mongo to use MongoDB. Restart the dashboard after changing it.")
-        else:
-            st.write(f"🟢 **Storage: MongoDB** (`{env('MONGO_DB', 'nexus_smc_bot')}`)")
-        if st.button("Reconnect storage"):
-            _storage.clear()
-            st.rerun()
+            if st.button("Reconnect storage"):
+                _storage.clear()
+                st.rerun()
     with c2, st.container(border=True):
         tg = bool(env("TELEGRAM_BOT_TOKEN") and env("TELEGRAM_CHAT_ID"))
         st.write(("🟢" if tg else "🔴") + " **Telegram alerts** " + ("configured" if tg else "not configured"))
@@ -1000,14 +1076,17 @@ def page_history():
             mode = f1.selectbox("Mode", ["all", "paper", "live"])
             status = f2.multiselect("Status", sorted(df["status"].dropna().unique()))
             dmin, dmax = df["opened"].min().date(), df["opened"].max().date()
-            rng = f3.date_input("Opened between", (dmin, dmax))
+            rng = f3.date_input("Active between", (dmin, max(dmax, now_ist().date())),
+                                help="Includes trades opened, closed or held overnight in these dates")
             v = df.copy()
             if mode != "all":
                 v = v[v["mode"] == mode]
             if status:
                 v = v[v["status"].isin(status)]
             if isinstance(rng, (list, tuple)) and len(rng) == 2:
-                v = v[(v["opened"].dt.date >= rng[0]) & (v["opened"].dt.date <= rng[1])]
+                ids = {c.get("id") for c in combos
+                       if signal_view.active_between(c, rng[0].isoformat(), rng[1].isoformat())}
+                v = v[v["id"].isin(ids)]
             closed = v[v["status"] == "CLOSED"]
             m = st.columns(5)
             m[0].metric("Combos", len(v))
@@ -1271,7 +1350,8 @@ def main():
                 lbl, ok, _ = token_state(b)
                 st.caption(f"{'🟢' if ok else '🔴'} {b}: {lbl}")
             st_ = storage()
-            st.caption("🟢 MongoDB" if not isinstance(st_, LocalStorage) else "🟡 Local JSON storage")
+            st.caption("🟡 Local JSON storage" if isinstance(st_, LocalStorage) else
+                       ("🟢 MongoDB" if st_.online else "🟠 MongoDB offline - auto-reconnecting"))
         except Exception as e:  # noqa
             st.caption(f"status unavailable: {e}")
         if not env("DASHBOARD_PASSWORD"):

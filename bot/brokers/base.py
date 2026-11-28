@@ -27,6 +27,13 @@ class OptionQuote:
     opt_type: str             # CE | PE
     ltp: float
     instrument: Instrument
+    bid: float = 0.0          # best bid / ask (0 = not available, e.g. paper data or market closed)
+    ask: float = 0.0
+
+    @property
+    def spread(self):
+        """Bid-ask spread in rupees, None when the broker gave no depth."""
+        return round(self.ask - self.bid, 2) if self.bid > 0 and self.ask > 0 else None
 
 
 @dataclass

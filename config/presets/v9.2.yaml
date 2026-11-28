@@ -1,0 +1,64 @@
+# Pine defaults of Nexus_SMC_Trial_v9.2 (strategy block only).
+# v9.2 = v8.7 + ATR Adaptive (3.0x) SL (65-140 pts), exits at 1.25R target or 8 bars with close >= +0.5R,
+# break-even at 0.55R, 2-consecutive-loss 2 h hold, no time exit, max 5 live OB/FVG zones per side.
+# Loaded by the dashboard 'Load vX defaults' button; your settings.yaml is only changed when you press it and Save.
+strategy:
+  strategy_version: v9.2
+  strat1_IDM: true
+  idmTf: '5'
+  idmLookback: 4
+  strat6_IDM_Precision: false
+  strat8_HTF_IDM_Trap: true
+  strat2_CHOCH: true
+  chochStructureTf: '15'
+  strat9_Fake_CHOCH: true
+  htfSwingLength: 8
+  swingLength: 20
+  strat3_OB: true
+  obTimeframe: '15'
+  obMitigation: Wick Touch
+  maxOrderBlocks: 12
+  strat4_FVG: true
+  fvgTimeframe: '15'
+  fvgAtrMultiplier: 0.65
+  maxFvgCount: 12
+  strat5_MTF: true
+  htfTimeframe: '60'
+  strat7_PD_Filter: false
+  strat12_OB_Confirm: true
+  strat13_Psychology1: false
+  strat10_Momentum_CISD: false
+  minDisplacementPct: 40.0
+  strat11_3Condition: false
+  strat16_POI_Confluence: false
+  filterEmaSqueeze: false
+  enableChopFilter: false
+  chopIndexMax: 61.8
+  enableAdxFilter: true
+  adxThreshold: 24.0
+  opposingZoneBufferAtr: 1.5
+  signalCooldownBars: 8
+  filterDuplicateTrades: true
+  strictTriggerLock: true
+  allowMultiTriggerEntries: false
+  slMode: ATR Adaptive (3.0x)
+  slFixedPreset: 70 Points
+  slCustomPoints: 80.0
+  slSwingLookback: 20
+  slBufferPoints: 5.0
+  strat14_Psychology2: true
+  maxAllowedSlPoints: 160.0
+  minTargetRr: 1.25
+  subMinTargetAction: Extend to Min R:R
+  enableMaxTargetCap: false
+  maxTargetRr: 4.0
+  enableBreakEven: true
+  tp1RrMultiple: 0.55
+  strat15_LiquidityRun: true
+  costPerTradePoints: 3.0
+  maxTradeDuration: 150
+  enableTimeExit: false
+  enableLossHold: true
+  holdDurationHours: 2
+  fix_ob_mitigation: false
+  fix_sl_lookback: false

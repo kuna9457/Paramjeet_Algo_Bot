@@ -55,5 +55,8 @@ strategy:
   strat15_LiquidityRun: false
   costPerTradePoints: 3.0
   maxTradeDuration: 150
+  enableTimeExit: true
+  enableLossHold: false
+  holdDurationHours: 2
   fix_ob_mitigation: false
   fix_sl_lookback: false

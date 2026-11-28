@@ -20,9 +20,9 @@ bot:
 brokers:
   enabled: [upstox, zerodha]  # any of: upstox, zerodha  (orders mirrored on all enabled)
   data_source: upstox         # broker used for candles, LTP and option chain
-  lots:
-    upstox: 1
-    zerodha: 1
+  lots:                       # qty = lots x exchange lot size (NIFTY 65 now -> 2 lots = 130)
+    upstox: 2
+    zerodha: 2
   product: NRML               # NRML (carry forward / overnight) | MIS (intraday)
   order_type: LIMIT           # LIMIT | MARKET
   limit_buffer_pts: 2.0       # LIMIT price = LTP + buffer (buy) / LTP - buffer (sell)
@@ -32,19 +32,25 @@ brokers:
   freeze_qty: 1755            # NSE freeze quantity for NIFTY options (orders are sliced above this; Upstox master value used if smaller)
 
 # ------------------------------------------------------------------ 3. OPTIONS HEDGE
-# BUY signal  -> SELL PUT  (premium in the sell band, e.g. <= 55) + BUY PUT  at a LOWER strike  (hedge)
-# SELL signal -> SELL CALL (premium in the sell band)            + BUY CALL at a HIGHER strike (hedge)
+# BUY signal  -> SELL PUT  (ATM / 50 OTM) + BUY PUT  200 pts below ATM (hedge)   [strike_mode atm_offset]
+# SELL signal -> SELL CALL (ATM / 50 OTM) + BUY CALL 200 pts above ATM (hedge)
+# (strike_mode premium_band = old rule: sell <= premium cap, hedge by sell - buy premium gap)
 hedge:
-  pair_mode: debit            # debit = net debit (range_min/max) | credit = you RECEIVE a net credit
-  credit_min: 10              # CREDIT mode: net credit range (points): SellLegLTP - BuyLegLTP
-  credit_max: 15
-  expiry_mode: fixed_date # nearest_weekly (default) | next_weekly | current_monthly | next_monthly | fixed_date (pick an exact date in the dashboard)
+  expiry_mode: min_days # min_days (first expiry with >= min_days_to_expiry days left) | nearest_weekly | next_weekly | current_monthly | next_monthly | fixed_date
   expiry_date: "2026-12-01"             # YYYY-MM-DD, only used when expiry_mode = fixed_date
   use_next_expiry_on_expiry_day: true   # on expiry day itself, pick the following expiry
-  sell_min_premium: 0         # SELL leg premium band (0 = no limit). The bot sells the richest option inside it
+  min_days_to_expiry: 7       # expiry_mode = min_days: first weekly/monthly expiry with at least this many days left (>= 2)
+  max_days_to_expiry: 0       # expiry_mode = min_days: and at most this many (0 = no limit)
+  strike_mode: atm_offset      # atm_offset = sell ATM / up to sell_otm_points OTM + hedge hedge_otm_points OTM | premium_band = sell <= premium + hedge by premium gap
+  sell_otm_points: 50         # atm_offset: sold leg = ATM or up to this many points OTM (0 = ATM only)
+  hedge_otm_points: 200       # atm_offset: hedge leg strike = ATM -/+ this (PUT below / CALL above) -> width 150-200
+  atm_sell_strike_rule: ends_with_00 # atm_offset: sold strike must end with any | ends_with_00 | ends_with_50
+  atm_buy_strike_rule: ends_with_50  # atm_offset: hedge strike must end with any | ends_with_00 | ends_with_50 (nearest to the hedge distance)
+  atm_sell_min_premium: 0     # atm_offset: sold leg premium must be >= this (0 = no limit)
+  atm_sell_max_premium: 0     # atm_offset: sold leg premium must be <= this (0 = no limit)
+  max_bid_ask_spread: 0.30    # both legs: skip an option whose bid-ask spread is wider than this in Rs (0 = off)
+  sell_min_premium: 0         # premium_band: SELL leg premium band (0 = no limit). The bot sells the richest option inside it
   sell_max_premium: 55        # e.g. 55 -> sells the put/call whose premium is closest to 55 without going over
-  buy_min_premium: 35         # CREDIT mode: buy leg premium band (0 = no limit on that side)
-  buy_max_premium: 40
   hedge_diff_min: 10          # Sell premium - hedge (buy) premium must be inside this range (0 = no limit)
   hedge_diff_max: 15          # e.g. sell 52, range 10-15 -> hedge premium 37-42, strike beyond the sold one
   strike_step: 50
@@ -81,9 +87,10 @@ strategy:
   # === 0. LOGIC VERSION ===
   # v7.4 = original logic (unchanged) | v8.0 = adds Strict Per-Trigger Lock, newest-zone retest, IDM reset on CHoCH.
   # v8.7 = v8.0 + HTML-backtest sync: +70 pts / 12-bar quant wins, 70-pt fallback target, no loss-freeze, OB>FVG>CHoCH>IDM priority.
-  # Changing this does NOT change any other setting. To use the v8.0 Pine defaults, press
-  # "Load v8.0 / v8.7 defaults" in the dashboard (or copy config/presets/<version>.yaml).
-  strategy_version: "v8.7"
+  # v9.2 = v8.7 + ATR 3.0x SL (65-140), exits at 1.25R or 8 bars with close >= +0.5R, break-even at 0.55R, 2-loss 2 h hold.
+  # Changing this does NOT change any other setting. To use a version's Pine defaults, press
+  # "Load vX defaults" in the dashboard (or copy config/presets/<version>.yaml).
+  strategy_version: "v9.2"
 
   # === 1. IDM ENGINE (TREND PULLBACK) ===
   strat1_IDM: true
@@ -103,13 +110,13 @@ strategy:
   strat3_OB: true
   obTimeframe: "15"
   obMitigation: "Wick Touch"  # Wick Touch | 50% Mean Threshold | Full Candle Body  (no effect in Pine, see fix_ob_mitigation)
-  maxOrderBlocks: 25          # 1 - 60
+  maxOrderBlocks: 12          # 1 - 60
 
   # === 4. FAIR VALUE GAP ENGINE ===
   strat4_FVG: true
   fvgTimeframe: "15"          # blank = chart TF; else minutes (e.g. 15, 60) - gaps built from that timeframe's candles
   fvgAtrMultiplier: 0.65      # min gap size = this x ATR(14); 0 = accept any gap
-  maxFvgCount: 25             # 1 - 60
+  maxFvgCount: 12             # 1 - 60
 
   # === 5. HTF TREND & QUALITY FILTERS ===
   strat5_MTF: true
@@ -125,30 +132,33 @@ strategy:
   enableChopFilter: false
   chopIndexMax: 61.8
   enableAdxFilter: true
-  adxThreshold: 20.0
+  adxThreshold: 24.0
   opposingZoneBufferAtr: 1.5
-  signalCooldownBars: 5
+  signalCooldownBars: 8
   filterDuplicateTrades: false
   strictTriggerLock: true     # v8.0 only: no new FVG/IDM/OB/CHoCH while that same trigger's trade is running (ignored in v7.4)
   allowMultiTriggerEntries: false
 
   # === 6. SWING STOP LOSS & TARGETS (Nifty points) ===
-  slMode: "Fixed Points (Preset)"   # Fixed Points (Preset) | Swing High/Low | Custom Points
+  slMode: "ATR Adaptive (3.0x)"   # Fixed Points (Preset) | Swing High/Low | Custom Points | ATR Adaptive (3.0x) (v9.2 only)
   slFixedPreset: "70 Points"        # 70 Points | 80 Points | 90 Points
   slCustomPoints: 80.0
   slSwingLookback: 20         # Swing High/Low SL lookback (bars): used only when fix_sl_lookback is true (Pine ignores it)
   slBufferPoints: 5.0
   strat14_Psychology2: true
   maxAllowedSlPoints: 160.0
-  minTargetRr: 1.5
+  minTargetRr: 1.25
   subMinTargetAction: "Extend to Min R:R"   # Extend to Min R:R | Skip Trade
   enableMaxTargetCap: false
   maxTargetRr: 4.0
   enableBreakEven: true
-  tp1RrMultiple: 1.0
+  tp1RrMultiple: 0.55
   strat15_LiquidityRun: true
   costPerTradePoints: 3.0
-  maxTradeDuration: 500
+  maxTradeDuration: 150
+  enableTimeExit: true        # v9.2 only: close after maxTradeDuration bars (Pine v9.2 default false = pure swing)
+  enableLossHold: true       # v9.2 only: pause new entries after 2 consecutive losses (Pine v9.2 default true)
+  holdDurationHours: 2        # v9.2 only: pause length in hours (1 - 6)
 
   # === Pine quirk fixes (false = behave exactly like TradingView) ===
   fix_ob_mitigation: false

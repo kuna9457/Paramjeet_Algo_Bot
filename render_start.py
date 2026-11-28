@@ -22,11 +22,21 @@ def pull_settings() -> None:
     if not uri:
         return
     try:
+        import time
+
         from pymongo import MongoClient
 
         from bot.config import DEFAULT_SETTINGS, load_settings
-        c = MongoClient(uri, serverSelectionTimeoutMS=8000)
-        doc = c[os.getenv("MONGO_DB", "nexus_smc_bot")]["config"].find_one({"id": "settings"})
+        for attempt in range(4):                 # Atlas / DNS can be slow right after a cold start
+            try:
+                c = MongoClient(uri, serverSelectionTimeoutMS=8000)
+                doc = c[os.getenv("MONGO_DB", "nexus_smc_bot")]["config"].find_one({"id": "settings"})
+                break
+            except Exception as e:  # noqa
+                print(f"[render_start] MongoDB not reachable yet ({e}), retry {attempt + 1}/4", flush=True)
+                if attempt == 3:
+                    raise
+                time.sleep(5)
         if not doc or not doc.get("text"):
             print("[render_start] no saved settings in MongoDB - using the defaults from the repo", flush=True)
             return

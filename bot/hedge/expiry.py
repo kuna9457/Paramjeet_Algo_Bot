@@ -13,9 +13,16 @@ def monthly_expiries(expiries: List[date]) -> List[date]:
     return sorted(last.values())
 
 
+EXPIRY_MODES = ("min_days", "nearest_weekly", "next_weekly", "current_monthly", "next_monthly", "fixed_date")
+
+
 def select_expiry(expiries: List[date], mode: str, today: date, fixed: str = "",
-                  use_next_on_expiry_day: bool = True) -> Optional[date]:
+                  use_next_on_expiry_day: bool = True, min_days: int = 7, max_days: int = 0) -> Optional[date]:
     live = sorted(e for e in expiries if e >= today)
+    if mode == "min_days":
+        # first expiry (weekly or monthly) with at least min_days left, and at most max_days (0 = no limit)
+        ok = [e for e in live if (e - today).days >= int(min_days) and (not max_days or (e - today).days <= int(max_days))]
+        return ok[0] if ok else None
     if use_next_on_expiry_day:
         live = [e for e in live if e > today] or live
     if not live:
@@ -40,15 +47,24 @@ def select_expiry(expiries: List[date], mode: str, today: date, fixed: str = "",
 
 
 def choose_expiry(expiries: List[date], mode: str, today: date, fixed: str = "",
-                  use_next_on_expiry_day: bool = True):
+                  use_next_on_expiry_day: bool = True, min_days: int = 7, max_days: int = 0):
     """select_expiry + safe fallback. Returns (expiry, note). If the exact date the client picked is no longer
     listed (expired / not yet launched by the exchange) the nearest upcoming expiry is used and `note` says so."""
-    exp = select_expiry(expiries, mode, today, fixed, use_next_on_expiry_day)
+    exp = select_expiry(expiries, mode, today, fixed, use_next_on_expiry_day, min_days, max_days)
+    if exp is None and mode == "min_days":
+        return None, (f"no expiry with {min_days}" + (f"-{max_days}" if max_days else "+") + " days left")
     if exp is None and mode == "fixed_date":
         exp = select_expiry(expiries, "nearest_weekly", today, "", use_next_on_expiry_day)
         if exp:
             return exp, f"chosen expiry {fixed} is not available - using nearest expiry {exp}"
     return exp, ""
+
+
+def expiry_for(expiries: List[date], H, today: date):
+    """choose_expiry with every option read from the hedge settings section."""
+    return choose_expiry(expiries, H.get("expiry_mode", "nearest_weekly"), today, H.get("expiry_date", ""),
+                         bool(H.get("use_next_expiry_on_expiry_day", True)), int(H.get("min_days_to_expiry", 7) or 0),
+                         int(H.get("max_days_to_expiry", 0) or 0))
 
 
 def expiry_options(expiries: List[date], today: date) -> List[dict]:

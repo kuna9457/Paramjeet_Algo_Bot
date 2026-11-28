@@ -37,7 +37,7 @@ def setup_logging():
 
 def storage_from(S):
     return make_storage(S.storage.get("backend", "mongo"), env("MONGO_URI"), env("MONGO_DB", "nexus_smc_bot"),
-                        ROOT / "data_cache")
+                        ROOT / "data_cache", role="bot")
 
 
 def cmd_run(S, args):
@@ -128,7 +128,7 @@ def cmd_backtest(S, args):
 
 def cmd_scan(S, args):
     from bot.data.candle import now_ist
-    from bot.hedge.expiry import select_expiry
+    from bot.hedge.expiry import expiry_for
     from bot.hedge.scanner import find_pair, range_text, strike_window
     from bot.live.runner import build_broker
     st = storage_from(S)
@@ -136,8 +136,9 @@ def cmd_scan(S, args):
     b.connect()
     b.load_instruments()
     H = S.hedge
-    exp = select_expiry(b.option_expiries(), H.expiry_mode, now_ist().date(), H.get("expiry_date", ""),
-                        bool(H.get("use_next_expiry_on_expiry_day", True)))
+    exp, note = expiry_for(b.option_expiries(), H, now_ist().date())
+    if note:
+        print(note)
     inst = b.signal_instrument(S.bot.signal_symbol)
     ref = b.ltp([inst]).get(inst.key)
     _, strikes = strike_window(ref, int(H.strike_step), int(H.strike_scan_width))

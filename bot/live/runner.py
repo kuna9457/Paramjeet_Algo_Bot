@@ -23,13 +23,14 @@ from ..config import ROOT, Settings, env
 from ..data.candle import (bucket_bounds, closed_only, now_ist, resample, session_close_dt,
                            session_open_dt)
 from ..hedge.executor import ComboExecutor
-from ..hedge.expiry import choose_expiry, save_expiry_list
+from ..hedge.expiry import expiry_for, save_expiry_list
 from ..hedge.scanner import find_pair, range_text, strike_window
 from ..services import messages as M
 from ..services.notifier import Notifier
 from ..services.storage import Storage
 from ..services.tokens import get_token
 from ..strategy.engine import Event, NexusEngine
+from ..ui.signal_view import active_between, closed_on
 
 log = logging.getLogger("runner")
 KILL_FILE = ROOT / "KILL"
@@ -265,13 +266,12 @@ class LiveBot:
     def open_hedge(self, ev: Event) -> dict:
         """Pick the option pair and trade it. Returns the decision for the signal log."""
         H = self.S.hedge
-        expiry, note = choose_expiry(self.data.option_expiries(), H.expiry_mode, now_ist().date(),
-                                     H.get("expiry_date", ""), bool(H.get("use_next_expiry_on_expiry_day", True)))
+        expiry, note = expiry_for(self.data.option_expiries(), H, now_ist().date())
         if note:
             self.notify.send(f"⚠ {note}")
         if not expiry:
-            self.notify.send("❌ No valid expiry found - trade skipped")
-            return {"outcome": "SKIPPED", "reason": "No valid expiry found"}
+            self.notify.send(f"❌ No valid expiry found{' (' + note + ')' if note else ''} - trade skipped")
+            return {"outcome": "SKIPPED", "reason": "No valid expiry found" + (f" ({note})" if note else "")}
         deadline = time.time() + float(H.get("max_rescan_sec", 60))
         pair, matches, scans, ref = None, [], 0, ev.price
         while True:
@@ -428,8 +428,9 @@ class LiveBot:
         return True
 
     def send_summary(self):
-        combos = self.today_combos()
-        pnl = sum(sum((c.get("pnl") or {}).values()) for c in combos if c.get("status") == "CLOSED")
+        day = now_ist().date().isoformat()
+        combos = [c for c in self.storage.find("combos") if active_between(c, day, day)]   # incl. overnight
+        pnl = sum(sum((c.get("pnl") or {}).values()) for c in combos if closed_on(c, day))
         self.notify.send(f"📊 Day summary {now_ist().date()}: combos {len(combos)}, realized P&L ₹{pnl:,.0f}\n"
                          f"Strategy stats: {self.engine.stats()}\nOpen position: {self.engine.position()}"
                          + ("\n\nToday's trades:\n" + "\n".join(combo_status_line(c) for c in combos) if combos else "")

@@ -12,7 +12,8 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SETTINGS = ROOT / "config" / "settings.yaml"
 PRESETS_DIR = ROOT / "config" / "presets"
-STRATEGY_VERSIONS = ("v7.4", "v8.0", "v8.7")
+STRATEGY_VERSIONS = ("v7.4", "v8.0", "v8.7", "v9.2")
+SL_MODES = ("Fixed Points (Preset)", "Swing High/Low", "Custom Points", "ATR Adaptive (3.0x)")
 
 
 def load_preset(version: str) -> dict:
@@ -24,6 +25,7 @@ def load_preset(version: str) -> dict:
 @dataclass
 class StrategySettings:
     # 0. Logic version: "v7.4" (original, default) | "v8.0" (per-trigger lock) | "v8.7" (HTML-backtest sync)
+    #    | "v9.2" (Trial v9.2: ATR SL, 1.25R / 8-bar 0.5R exits, 0.55R break-even, 2-loss hold)
     strategy_version: str = "v7.4"
     # 1. IDM
     strat1_IDM: bool = True
@@ -84,6 +86,10 @@ class StrategySettings:
     strat15_LiquidityRun: bool = False
     costPerTradePoints: float = 3.0
     maxTradeDuration: int = 150
+    # v9.2 only
+    enableTimeExit: bool = True     # v9.2: time exit after maxTradeDuration bars only when true (Pine default false)
+    enableLossHold: bool = False    # v9.2: pause new entries after 2 consecutive losses (Pine default true)
+    holdDurationHours: int = 2      # v9.2: length of that pause (1 - 6 h)
     # fixes
     fix_ob_mitigation: bool = False
     fix_sl_lookback: bool = False
@@ -128,6 +134,12 @@ def _build_strategy(d: dict, bot: dict) -> StrategySettings:
     s.strategy_version = str(s.strategy_version).strip()
     if s.strategy_version not in STRATEGY_VERSIONS:
         raise ValueError(f"strategy_version must be one of {STRATEGY_VERSIONS}, got {s.strategy_version!r}")
+    if s.slMode not in SL_MODES:
+        raise ValueError(f"slMode must be one of {SL_MODES}, got {s.slMode!r}")
+    if s.slMode == "ATR Adaptive (3.0x)" and s.strategy_version != "v9.2":
+        raise ValueError("slMode 'ATR Adaptive (3.0x)' exists only in strategy_version v9.2")
+    if not 1 <= int(s.holdDurationHours) <= 6:
+        raise ValueError("holdDurationHours must be 1 - 6")
     # normalise timeframe strings
     for tf in ("idmTf", "chochStructureTf", "obTimeframe", "fvgTimeframe", "htfTimeframe"):
         v = getattr(s, tf)
@@ -138,7 +150,8 @@ def _build_strategy(d: dict, bot: dict) -> StrategySettings:
 
 
 def _validate_hedge(h: dict) -> None:
-    for lo_key, hi_key in (("sell_min_premium", "sell_max_premium"), ("hedge_diff_min", "hedge_diff_max")):
+    for lo_key, hi_key in (("sell_min_premium", "sell_max_premium"), ("hedge_diff_min", "hedge_diff_max"),
+                           ("atm_sell_min_premium", "atm_sell_max_premium"), ("min_days_to_expiry", "max_days_to_expiry")):
         lo, hi = float(h.get(lo_key, 0) or 0), float(h.get(hi_key, 0) or 0)
         if lo < 0 or hi < 0:
             raise ValueError(f"hedge.{lo_key} / {hi_key} cannot be negative")
@@ -148,6 +161,27 @@ def _validate_hedge(h: dict) -> None:
         rule = h.get(key, "ends_with_50")
         if rule not in ("any", "ends_with_00", "ends_with_50"):
             raise ValueError(f"hedge.{key} must be any / ends_with_00 / ends_with_50, got {rule!r}")
+    mode = h.get("strike_mode", "premium_band")
+    if mode not in ("atm_offset", "premium_band"):
+        raise ValueError(f"hedge.strike_mode must be atm_offset / premium_band, got {mode!r}")
+    step = int(h.get("strike_step", 50) or 50)
+    so, ho = int(h.get("sell_otm_points", 50) or 0), int(h.get("hedge_otm_points", 200) or 0)
+    if so < 0 or so % step or ho % step:
+        raise ValueError(f"hedge.sell_otm_points / hedge_otm_points must be multiples of strike_step ({step})")
+    if mode == "atm_offset" and ho <= so:
+        raise ValueError("hedge.hedge_otm_points must be further out of the money than sell_otm_points")
+    if ho > step * int(h.get("strike_scan_width", 10) or 10):
+        raise ValueError("hedge.hedge_otm_points is outside the scanned strikes - raise strike_scan_width")
+    for key in ("atm_sell_strike_rule", "atm_buy_strike_rule"):
+        if h.get(key, "any") not in ("any", "ends_with_00", "ends_with_50"):
+            raise ValueError(f"hedge.{key} must be any / ends_with_00 / ends_with_50, got {h.get(key)!r}")
+    if mode == "atm_offset" and h.get("atm_sell_strike_rule", "any") != "any" and so < 50:
+        raise ValueError("hedge.sell_otm_points must be at least 50 when the sold strike must end with 00 / 50 "
+                         "(otherwise there is no trade whenever ATM has the other ending)")
+    if float(h.get("max_bid_ask_spread", 0) or 0) < 0:
+        raise ValueError("hedge.max_bid_ask_spread cannot be negative")
+    if h.get("expiry_mode") == "min_days" and int(h.get("min_days_to_expiry", 7) or 0) < 2:
+        raise ValueError("hedge.min_days_to_expiry must be at least 2 (never trade 0 / 1 day to expiry)")
 
 
 def load_settings(path: str | Path | None = None) -> Settings:

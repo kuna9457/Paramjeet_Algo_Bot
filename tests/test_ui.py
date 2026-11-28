@@ -81,3 +81,15 @@ def test_add_missing_keys_restores_new_settings_without_touching_saved_values():
     assert d["strategy"]["fvgTimeframe"] == expected_fvg_tf and d["strategy"]["maxFvgCount"] == 9
     assert merged.index("fvgTimeframe") < merged.index("maxFvgCount")
     assert add_missing_keys(merged, default) == merged
+
+
+def test_overnight_trades_count_for_the_day():
+    from bot.ui.signal_view import active_between, closed_on
+
+    carried = {"status": "CLOSED", "opened_at": "2026-11-25T14:00:00+05:30", "closed_at": "2026-11-26T09:20:00+05:30"}
+    still_open = {"status": "OPEN", "opened_at": "2026-11-24T14:00:00+05:30"}
+    old = {"status": "CLOSED", "opened_at": "2026-11-25T14:00:00+05:30", "closed_at": "2026-11-25T15:10:00+05:30"}
+    assert active_between(carried, "2026-11-26", "2026-11-26") and closed_on(carried, "2026-11-26")
+    assert active_between(still_open, "2026-11-26", "2026-11-26")
+    assert not active_between(old, "2026-11-26", "2026-11-26")
+    assert not active_between(still_open, "2026-11-23", "2026-11-23")
